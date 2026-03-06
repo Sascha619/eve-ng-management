@@ -1,0 +1,68 @@
+---
+- name: Configure RouterOS IPs from NetBox
+  hosts: all
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+    netbox_url: "http://netbox:8080"
+    netbox_token: "0123456789abcdef0123456789abcdef01234567"
+
+  tasks:
+    - name: Get device info from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?name={{ hostname | default(inventory_hostname) }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_device
+      delegate_to: localhost
+
+    - name: Get IP addresses from NetBox for this device
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?device_id={{ nb_device.json.results[0].id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_ips
+      delegate_to: localhost
+      when: nb_device.json.count > 0
+
+    - name: Build desired IP list from NetBox
+      ansible.builtin.set_fact:
+        desired_ips: "{{ desired_ips | default([]) + [{'address': item.address, 'interface': item.assigned_object.name}] }}"
+      loop: "{{ nb_ips.json.results }}"
+      when:
+        - nb_ips.json.results is defined
+        - item.assigned_object is not none
+        - item.assigned_object.name is defined
+      loop_control:
+        label: "{{ item.address }} -> {{ item.assigned_object.name | default('unassigned') }}"
+
+    - name: Get current IPs on router
+      community.routeros.command:
+        commands:
+          - /ip address print without-paging
+      register: current_ips
+
+    - name: Add missing IP addresses
+      community.routeros.command:
+        commands:
+          - "/ip address add address={{ item.address }} interface={{ item.interface }}"
+      loop: "{{ desired_ips | default([]) }}"
+      when: item.address not in (current_ips.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item.address }} on {{ item.interface }}"
+      ignore_errors: true
+
+    - name: Show final IP configuration
+      community.routeros.command:
+        commands:
+          - /ip address print without-paging
+      register: final_ips
+
+    - name: Display result
+      ansible.builtin.debug:
+        var: final_ips.stdout_lines

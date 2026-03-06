@@ -1,0 +1,17 @@
+---
+plugin: netbox.netbox.nb_inventory
+api_endpoint: http://netbox:8080
+token: 0123456789abcdef0123456789abcdef01234567
+validate_certs: false
+
+group_by:
+  - device_roles
+  - platforms
+  - tags
+
+query_filters:
+  - has_primary_ip: true
+
+compose:
+  ansible_host: primary_ip4.address | ansible.utils.ipaddr('address')
+  ansible_network_os: platform.slug

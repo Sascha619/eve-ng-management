@@ -1,0 +1,36 @@
+---
+- name: RouterOS Basic Configuration
+  hosts: all
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: ""
+
+  tasks:
+    - name: Get RouterOS version
+      community.routeros.command:
+        commands:
+          - /system resource print
+      register: routeros_version
+
+    - name: Show version
+      ansible.builtin.debug:
+        var: routeros_version.stdout_lines
+
+    - name: Set hostname from NetBox
+      community.routeros.command:
+        commands:
+          - "/system identity set name={{ inventory_hostname }}"
+      when: inventory_hostname is defined
+
+    - name: Get interface list
+      community.routeros.command:
+        commands:
+          - /interface print
+      register: interfaces
+
+    - name: Show interfaces
+      ansible.builtin.debug:
+        var: interfaces.stdout_lines
