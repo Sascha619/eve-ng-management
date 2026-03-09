@@ -1,0 +1,269 @@
+---
+- name: Create VLAN on all network devices
+  hosts: all
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+    netbox_url: "http://netbox:8080"
+    netbox_token: "0123456789abcdef0123456789abcdef01234567"
+    reference_vlan: 1242
+    vlan_supernet: "172.18.255.0/24"
+    vlan_prefix_length: 27
+
+  tasks:
+    - name: Validate vlan_id
+      ansible.builtin.assert:
+        that:
+          - vlan_id is defined
+          - vlan_id | int > 0
+          - vlan_id | int < 4095
+        fail_msg: "vlan_id must be a valid VLAN ID (1-4094)"
+      run_once: true
+
+    - name: Calculate VRRP ID
+      ansible.builtin.set_fact:
+        vrrp_id: "{{ vlan_id | int - 1000 }}"
+      run_once: true
+
+    - name: Validate VRRP ID range
+      ansible.builtin.assert:
+        that:
+          - vrrp_id | int > 0
+          - vrrp_id | int < 256
+        fail_msg: "VRID {{ vrrp_id }} out of range (1-255). VLAN ID must be 1001-1255."
+      run_once: true
+
+    - name: Check if VLAN exists in NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ vlan_id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_vlan_check
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: true
+
+    - name: Get NetBox site ID
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/sites/?slug=eve-ng-lab"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_site
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_vlan_check is succeeded
+
+    - name: Create VLAN in NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          vid: "{{ vlan_id | int }}"
+          name: "VLAN-{{ vlan_id }}"
+          status: active
+          site: "{{ nb_site.json.results[0].id }}"
+        status_code: 201
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_vlan_check is succeeded
+        - nb_vlan_check.json.count == 0
+        - nb_site is succeeded
+        - nb_site.json.count > 0
+
+    # ── NetBox: Subnet Allocation ─────────────────────────────
+    - name: Re-fetch VLAN from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ vlan_id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_vlan
+      delegate_to: localhost
+      run_once: true
+      when: nb_vlan_check is succeeded
+
+    - name: Check if prefix already exists for this VLAN
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?vlan_id={{ nb_vlan.json.results[0].id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_prefix_check
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_vlan is not skipped
+        - nb_vlan.json.count > 0
+
+    - name: Get parent prefix
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ vlan_supernet }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_parent
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_prefix_check is not skipped
+        - nb_prefix_check.json.count == 0
+
+    - name: Create parent prefix if missing
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          prefix: "{{ vlan_supernet }}"
+          status: active
+          site: "{{ nb_site.json.results[0].id }}"
+          description: "VLAN Router Subnets"
+        status_code: 201
+      register: nb_parent_new
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_parent is not skipped
+        - nb_parent.json.count == 0
+
+    - name: Set parent prefix ID
+      ansible.builtin.set_fact:
+        parent_prefix_id: "{{ (nb_parent.json.count > 0) | ternary(nb_parent.json.results[0].id, nb_parent_new.json.id) }}"
+      run_once: true
+      when:
+        - nb_prefix_check is not skipped
+        - nb_prefix_check.json.count == 0
+
+    - name: Allocate /{{ vlan_prefix_length }} subnet from parent
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ parent_prefix_id }}/available-prefixes/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          prefix_length: "{{ vlan_prefix_length }}"
+          status: active
+          vlan: "{{ nb_vlan.json.results[0].id }}"
+          site: "{{ nb_site.json.results[0].id }}"
+          description: "VLAN-{{ vlan_id }}"
+        status_code: 201
+      register: nb_prefix_allocated
+      delegate_to: localhost
+      run_once: true
+      when:
+        - parent_prefix_id is defined
+
+    - name: Set subnet facts for router IP assignment
+      ansible.builtin.set_fact:
+        vlan_prefix_id: >-
+          {{ (nb_prefix_check is not skipped and nb_prefix_check.json.count > 0)
+             | ternary(nb_prefix_check.json.results[0].id,
+                       nb_prefix_allocated.json.id | default('')) }}
+        vlan_prefix: >-
+          {{ (nb_prefix_check is not skipped and nb_prefix_check.json.count > 0)
+             | ternary(nb_prefix_check.json.results[0].prefix,
+                       nb_prefix_allocated.json.prefix | default('')) }}
+      run_once: true
+      when: >-
+        (nb_prefix_check is defined and nb_prefix_check is not skipped and nb_prefix_check.json.count > 0)
+        or
+        (nb_prefix_allocated is defined and nb_prefix_allocated is not skipped and nb_prefix_allocated is succeeded)
+
+    # ── NetBox: VRRP VIP Allocation ────────────────────────────
+    - name: Check for existing VRRP VIP in prefix
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?parent={{ vlan_prefix }}&role=vip&description__ic=VRRP%20VLAN-{{ vlan_id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_vip_check
+      delegate_to: localhost
+      run_once: true
+      when:
+        - vlan_prefix_id is defined
+        - vlan_prefix_id | string | length > 0
+
+    - name: Allocate VRRP VIP from prefix
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ vlan_prefix_id }}/available-ips/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          status: active
+          role: vip
+          description: "VRRP VLAN-{{ vlan_id }}"
+        status_code: 201
+        return_content: true
+      register: nb_vip_allocated
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_vip_check is not skipped
+        - nb_vip_check.json.count == 0
+
+    - name: Set VRRP VIP fact
+      ansible.builtin.set_fact:
+        vrrp_vip: >-
+          {{ (nb_vip_check is not skipped and nb_vip_check.json.count > 0)
+             | ternary(nb_vip_check.json.results[0].address,
+                       nb_vip_allocated.json.address | default('')) }}
+      run_once: true
+      when: >-
+        (nb_vip_check is defined and nb_vip_check is not skipped and nb_vip_check.json.count > 0)
+        or
+        (nb_vip_allocated is defined and nb_vip_allocated is not skipped and nb_vip_allocated is succeeded)
+
+    # ── Device Detection ──────────────────────────────────────
+    - name: Detect bridge with VLAN filtering
+      community.routeros.command:
+        commands:
+          - /interface bridge print count-only where vlan-filtering=yes
+      register: bridge_count
+
+    - name: Detect existing VLAN sub-interfaces
+      community.routeros.command:
+        commands:
+          - /interface vlan print count-only
+      register: vlan_iface_count
+
+    - name: Parse detection results
+      ansible.builtin.set_fact:
+        bridge_num: "{{ bridge_count.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+        vlan_iface_num: "{{ vlan_iface_count.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+    - name: Set device type facts
+      ansible.builtin.set_fact:
+        is_switch: "{{ bridge_num | int > 0 }}"
+        is_router: "{{ vlan_iface_num | int > 0 and bridge_num | int == 0 }}"
+
+    - name: Skip device without VLAN capability
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has no bridge or VLAN interfaces — skipping"
+      when: not (is_switch | bool) and not (is_router | bool)
+
+    - name: Include switch VLAN tasks
+      ansible.builtin.include_tasks: _vlan_switch.yml
+      when: is_switch | bool
+
+    - name: Include router VLAN tasks
+      ansible.builtin.include_tasks: _vlan_router.yml
+      when: is_router | bool

@@ -1,0 +1,55 @@
+---
+- name: "[Switch] Check if VLAN already exists in bridge"
+  community.routeros.command:
+    commands:
+      - "/interface bridge vlan print count-only where vlan-ids={{ vlan_id }}"
+  register: sw_vlan_exists_raw
+
+- name: "[Switch] Parse VLAN count"
+  ansible.builtin.set_fact:
+    sw_vlan_count: "{{ sw_vlan_exists_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Switch] VLAN already exists"
+  ansible.builtin.debug:
+    msg: "VLAN {{ vlan_id }} already exists on {{ inventory_hostname }}"
+  when: sw_vlan_count | int > 0
+
+- name: "[Switch] Get reference VLAN to discover trunk ports"
+  community.routeros.command:
+    commands:
+      - "/interface bridge vlan print detail where vlan-ids={{ reference_vlan }}"
+  register: sw_ref_vlan
+  when: sw_vlan_count | int == 0
+
+- name: "[Switch] Extract tagged trunk ports from reference"
+  ansible.builtin.set_fact:
+    trunk_ports: "{{ sw_ref_vlan.stdout[0] | regex_search('tagged=([^\\s]+)', '\\1') | first }}"
+  when:
+    - sw_vlan_count | int == 0
+    - sw_ref_vlan.stdout[0] is defined
+    - sw_ref_vlan.stdout[0] is search('tagged=')
+
+- name: "[Switch] Fail if reference VLAN not found"
+  ansible.builtin.fail:
+    msg: "Reference VLAN {{ reference_vlan }} not found on {{ inventory_hostname }}"
+  when:
+    - sw_vlan_count | int == 0
+    - trunk_ports is not defined
+
+- name: "[Switch] Add VLAN to bridge"
+  community.routeros.command:
+    commands:
+      - "/interface bridge vlan add bridge=bridge vlan-ids={{ vlan_id }} tagged={{ trunk_ports }}"
+  when:
+    - sw_vlan_count | int == 0
+    - trunk_ports is defined
+
+- name: "[Switch] Verify VLAN was created"
+  community.routeros.command:
+    commands:
+      - "/interface bridge vlan print where vlan-ids={{ vlan_id }}"
+  register: sw_verify
+
+- name: "[Switch] Show result"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: {{ sw_verify.stdout_lines[0] | default('VLAN not found') }}"

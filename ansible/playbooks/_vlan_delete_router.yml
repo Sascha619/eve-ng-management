@@ -1,0 +1,78 @@
+---
+# ── Remove VRRP VIP ──────────────────────────────────────
+- name: "[Router] Check VRRP VIP"
+  community.routeros.command:
+    commands:
+      - "/ip address print count-only where interface=VRRP-VLAN-{{ vlan_id }}"
+  register: rtr_vrrp_ip_raw
+
+- name: "[Router] Parse VRRP VIP count"
+  ansible.builtin.set_fact:
+    rtr_vrrp_ip_count: "{{ rtr_vrrp_ip_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] Remove VRRP VIP"
+  community.routeros.command:
+    commands:
+      - "/ip address remove [find interface=VRRP-VLAN-{{ vlan_id }}]"
+  when: rtr_vrrp_ip_count | int > 0
+
+# ── Remove VRRP Interface ────────────────────────────────
+- name: "[Router] Check VRRP interface"
+  community.routeros.command:
+    commands:
+      - "/interface vrrp print count-only where name=VRRP-VLAN-{{ vlan_id }}"
+  register: rtr_vrrp_raw
+
+- name: "[Router] Parse VRRP count"
+  ansible.builtin.set_fact:
+    rtr_vrrp_count: "{{ rtr_vrrp_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] Remove VRRP interface"
+  community.routeros.command:
+    commands:
+      - "/interface vrrp remove [find name=VRRP-VLAN-{{ vlan_id }}]"
+  when: rtr_vrrp_count | int > 0
+
+# ── Remove VLAN IP ────────────────────────────────────────
+- name: "[Router] Check VLAN IP"
+  community.routeros.command:
+    commands:
+      - "/ip address print count-only where interface=VLAN-{{ vlan_id }}"
+  register: rtr_ip_raw
+
+- name: "[Router] Parse VLAN IP count"
+  ansible.builtin.set_fact:
+    rtr_ip_count: "{{ rtr_ip_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] Remove VLAN IP"
+  community.routeros.command:
+    commands:
+      - "/ip address remove [find interface=VLAN-{{ vlan_id }}]"
+  when: rtr_ip_count | int > 0
+
+# ── Remove VLAN Interface ────────────────────────────────
+- name: "[Router] Check VLAN interface"
+  community.routeros.command:
+    commands:
+      - "/interface vlan print count-only where vlan-id={{ vlan_id }}"
+  register: rtr_vlan_raw
+
+- name: "[Router] Parse VLAN count"
+  ansible.builtin.set_fact:
+    rtr_vlan_count: "{{ rtr_vlan_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] VLAN not found — nothing to delete"
+  ansible.builtin.debug:
+    msg: "VLAN-{{ vlan_id }} not found on {{ inventory_hostname }}"
+  when: rtr_vlan_count | int == 0
+
+- name: "[Router] Remove VLAN interface"
+  community.routeros.command:
+    commands:
+      - "/interface vlan remove [find vlan-id={{ vlan_id }}]"
+  when: rtr_vlan_count | int > 0
+
+- name: "[Router] Show result"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: Removed VRRP + IP + VLAN-{{ vlan_id }}"
+  when: rtr_vlan_count | int > 0

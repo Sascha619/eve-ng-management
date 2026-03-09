@@ -196,6 +196,43 @@ Synchronisiert IP-Adressen von NetBox auf die RouterOS-Nodes:
 2. In Semaphore: "RouterOS Configure IPs" ausführen ▶
 3. Die IP wird automatisch auf dem Router konfiguriert
 
+#### `routeros_create_vlan.yml`
+Erstellt ein neues VLAN auf allen Switches und Routern. Benötigt nur eine VLAN-ID als Eingabe.
+
+**Was passiert automatisch:**
+1. VLAN wird in NetBox registriert (Source of Truth)
+2. Freies /27-Subnetz aus `172.18.255.0/24` wird über NetBox allokiert
+3. VRRP VIP wird aus dem Subnetz allokiert (NetBox, Rolle: VIP)
+4. Switches: Bridge VLAN-Eintrag mit tagged Trunk-Ports (automatisch erkannt)
+5. Router: VLAN Sub-Interface auf dem LAG (automatisch erkannt)
+6. Router: IP-Adresse aus dem allokierten Subnetz wird pro Router zugewiesen
+7. Router: VRRP-Interface mit VIP auf beiden Routern (VRID = VLAN-ID − 1000)
+8. Geräte ohne VLAN-Fähigkeit werden übersprungen
+
+**Semaphore-Setup:**
+1. Task Template "RouterOS Create VLAN" ist bereits konfiguriert
+2. Run ▶ klicken und VLAN-ID eingeben (z.B. `1243`)
+
+**Oder via Extra CLI Arguments:** `-e '{"vlan_id": 1243}'`
+
+Das Playbook ist idempotent — bereits existierende VLANs, Subnetze und IPs werden erkannt und übersprungen.
+
+#### `routeros_delete_vlan.yml`
+Löscht ein bestehendes VLAN komplett von allen Geräten und aus NetBox. Benötigt nur eine VLAN-ID.
+
+**Was wird gelöscht (in dieser Reihenfolge):**
+1. Router: VRRP VIP → VRRP-Interface → VLAN IP → VLAN Sub-Interface
+2. Switches: Bridge VLAN-Eintrag
+3. NetBox: IPs im Subnetz → Prefix → VLAN
+
+**Semaphore-Setup:**
+1. Task Template "RouterOS Delete VLAN" ist bereits konfiguriert
+2. Run ▶ klicken und VLAN-ID eingeben (z.B. `1243`)
+
+**Oder via Extra CLI Arguments:** `-e '{"vlan_id": 1243}'`
+
+Das Playbook ist idempotent — nicht vorhandene Objekte werden übersprungen.
+
 ### Ansible Collections
 
 Definiert in `ansible/requirements.yml`:

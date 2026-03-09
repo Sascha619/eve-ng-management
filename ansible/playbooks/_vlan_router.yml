@@ -1,0 +1,151 @@
+---
+- name: "[Router] Check if VLAN interface already exists"
+  community.routeros.command:
+    commands:
+      - "/interface vlan print count-only where vlan-id={{ vlan_id }}"
+  register: rtr_vlan_exists_raw
+
+- name: "[Router] Parse VLAN count"
+  ansible.builtin.set_fact:
+    rtr_vlan_count: "{{ rtr_vlan_exists_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] VLAN already exists"
+  ansible.builtin.debug:
+    msg: "VLAN-{{ vlan_id }} already exists on {{ inventory_hostname }}"
+  when: rtr_vlan_count | int > 0
+
+- name: "[Router] Get reference VLAN to discover parent interface"
+  community.routeros.command:
+    commands:
+      - "/interface vlan print detail where vlan-id={{ reference_vlan }}"
+  register: rtr_ref_vlan
+  when: rtr_vlan_count | int == 0
+
+- name: "[Router] Extract parent interface from reference VLAN"
+  ansible.builtin.set_fact:
+    parent_interface: "{{ rtr_ref_vlan.stdout[0] | regex_search('interface=([^\\s]+)', '\\1') | first }}"
+  when:
+    - rtr_vlan_count | int == 0
+    - rtr_ref_vlan.stdout[0] is defined
+    - rtr_ref_vlan.stdout[0] is search('interface=')
+
+- name: "[Router] Fail if reference VLAN not found"
+  ansible.builtin.fail:
+    msg: "Reference VLAN {{ reference_vlan }} not found on {{ inventory_hostname }}"
+  when:
+    - rtr_vlan_count | int == 0
+    - parent_interface is not defined
+
+- name: "[Router] Create VLAN sub-interface"
+  community.routeros.command:
+    commands:
+      - "/interface vlan add name=VLAN-{{ vlan_id }} vlan-id={{ vlan_id }} interface={{ parent_interface }}"
+  when:
+    - rtr_vlan_count | int == 0
+    - parent_interface is defined
+
+- name: "[Router] Verify VLAN interface was created"
+  community.routeros.command:
+    commands:
+      - "/interface vlan print where vlan-id={{ vlan_id }}"
+  register: rtr_verify
+
+- name: "[Router] Show VLAN result"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: {{ rtr_verify.stdout_lines[0] | default('VLAN not found') }}"
+
+# ── IP Address Assignment ─────────────────────────────────
+- name: "[Router] Check if VLAN interface already has an IP"
+  community.routeros.command:
+    commands:
+      - "/ip address print count-only where interface=VLAN-{{ vlan_id }}"
+  register: rtr_ip_exists_raw
+
+- name: "[Router] Parse IP count"
+  ansible.builtin.set_fact:
+    rtr_ip_count: "{{ rtr_ip_exists_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] IP already configured"
+  ansible.builtin.debug:
+    msg: "VLAN-{{ vlan_id }} already has an IP on {{ inventory_hostname }}"
+  when: rtr_ip_count | int > 0
+
+- name: "[Router] Allocate IP from NetBox prefix"
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/ipam/prefixes/{{ vlan_prefix_id }}/available-ips/"
+    method: POST
+    headers:
+      Authorization: "Token {{ netbox_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      status: active
+      description: "{{ hostname | default(inventory_hostname) }} VLAN-{{ vlan_id }}"
+    status_code: 201
+    return_content: true
+  register: nb_allocated_ip
+  delegate_to: localhost
+  when:
+    - rtr_ip_count | int == 0
+    - vlan_prefix_id is defined
+    - vlan_prefix_id | string | length > 0
+
+- name: "[Router] Configure IP on VLAN interface"
+  community.routeros.command:
+    commands:
+      - "/ip address add address={{ nb_allocated_ip.json.address }} interface=VLAN-{{ vlan_id }}"
+  when:
+    - nb_allocated_ip is not skipped
+    - nb_allocated_ip is succeeded
+
+- name: "[Router] Show IP assignment"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: {{ nb_allocated_ip.json.address }} → VLAN-{{ vlan_id }}"
+  when:
+    - nb_allocated_ip is not skipped
+    - nb_allocated_ip is succeeded
+
+# ── VRRP Configuration ────────────────────────────────────
+- name: "[Router] Check if VRRP interface already exists"
+  community.routeros.command:
+    commands:
+      - "/interface vrrp print count-only where name=VRRP-VLAN-{{ vlan_id }}"
+  register: rtr_vrrp_exists_raw
+
+- name: "[Router] Parse VRRP count"
+  ansible.builtin.set_fact:
+    rtr_vrrp_count: "{{ rtr_vrrp_exists_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] VRRP already exists"
+  ansible.builtin.debug:
+    msg: "VRRP-VLAN-{{ vlan_id }} already exists on {{ inventory_hostname }}"
+  when: rtr_vrrp_count | int > 0
+
+- name: "[Router] Create VRRP interface"
+  community.routeros.command:
+    commands:
+      - "/interface vrrp add name=VRRP-VLAN-{{ vlan_id }} interface=VLAN-{{ vlan_id }} vrid={{ vrrp_id }} version=3 v3-protocol=ipv4"
+  when: rtr_vrrp_count | int == 0
+
+- name: "[Router] Check if VRRP VIP is configured"
+  community.routeros.command:
+    commands:
+      - "/ip address print count-only where interface=VRRP-VLAN-{{ vlan_id }}"
+  register: rtr_vrrp_ip_raw
+
+- name: "[Router] Parse VRRP IP count"
+  ansible.builtin.set_fact:
+    rtr_vrrp_ip_count: "{{ rtr_vrrp_ip_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Router] Assign VIP to VRRP interface"
+  community.routeros.command:
+    commands:
+      - "/ip address add address={{ vrrp_vip }} interface=VRRP-VLAN-{{ vlan_id }}"
+  when:
+    - rtr_vrrp_ip_count | int == 0
+    - vrrp_vip is defined
+    - vrrp_vip | string | length > 0
+
+- name: "[Router] Show VRRP result"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: VRRP-VLAN-{{ vlan_id }} (vrid={{ vrrp_id }}, vip={{ vrrp_vip | default('n/a') }})"

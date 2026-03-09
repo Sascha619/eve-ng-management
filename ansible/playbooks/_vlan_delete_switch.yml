@@ -1,0 +1,26 @@
+---
+- name: "[Switch] Check if VLAN exists in bridge"
+  community.routeros.command:
+    commands:
+      - "/interface bridge vlan print count-only where vlan-ids={{ vlan_id }}"
+  register: sw_vlan_exists_raw
+
+- name: "[Switch] Parse VLAN count"
+  ansible.builtin.set_fact:
+    sw_vlan_count: "{{ sw_vlan_exists_raw.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+- name: "[Switch] VLAN not found — nothing to delete"
+  ansible.builtin.debug:
+    msg: "VLAN {{ vlan_id }} not found on {{ inventory_hostname }}"
+  when: sw_vlan_count | int == 0
+
+- name: "[Switch] Remove bridge VLAN entry"
+  community.routeros.command:
+    commands:
+      - "/interface bridge vlan remove [find vlan-ids={{ vlan_id }}]"
+  when: sw_vlan_count | int > 0
+
+- name: "[Switch] Show result"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: Removed bridge VLAN {{ vlan_id }}"
+  when: sw_vlan_count | int > 0

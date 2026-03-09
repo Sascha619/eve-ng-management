@@ -1,0 +1,146 @@
+---
+- name: Delete VLAN from all network devices
+  hosts: all
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+    netbox_url: "http://netbox:8080"
+    netbox_token: "0123456789abcdef0123456789abcdef01234567"
+
+  tasks:
+    - name: Validate vlan_id
+      ansible.builtin.assert:
+        that:
+          - vlan_id is defined
+          - vlan_id | int > 0
+          - vlan_id | int < 4095
+        fail_msg: "vlan_id must be a valid VLAN ID (1-4094)"
+      run_once: true
+
+    # ── Device Detection ──────────────────────────────────────
+    - name: Detect bridge with VLAN filtering
+      community.routeros.command:
+        commands:
+          - /interface bridge print count-only where vlan-filtering=yes
+      register: bridge_count
+
+    - name: Detect existing VLAN sub-interfaces
+      community.routeros.command:
+        commands:
+          - /interface vlan print count-only
+      register: vlan_iface_count
+
+    - name: Parse detection results
+      ansible.builtin.set_fact:
+        bridge_num: "{{ bridge_count.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+        vlan_iface_num: "{{ vlan_iface_count.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+    - name: Set device type facts
+      ansible.builtin.set_fact:
+        is_switch: "{{ bridge_num | int > 0 }}"
+        is_router: "{{ vlan_iface_num | int > 0 and bridge_num | int == 0 }}"
+
+    - name: Skip device without VLAN capability
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has no bridge or VLAN interfaces — skipping"
+      when: not (is_switch | bool) and not (is_router | bool)
+
+    # ── Device Cleanup ────────────────────────────────────────
+    - name: Include router delete tasks
+      ansible.builtin.include_tasks: _vlan_delete_router.yml
+      when: is_router | bool
+
+    - name: Include switch delete tasks
+      ansible.builtin.include_tasks: _vlan_delete_switch.yml
+      when: is_switch | bool
+
+    # ── NetBox Cleanup ────────────────────────────────────────
+    - name: Get VLAN from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ vlan_id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_vlan
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: true
+
+    - name: Get prefix for this VLAN
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?vlan_id={{ nb_vlan.json.results[0].id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_prefix
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_vlan is succeeded
+        - nb_vlan.json.count > 0
+
+    - name: Get IPs in prefix
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?parent={{ nb_prefix.json.results[0].prefix }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_ips
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_prefix is not skipped
+        - nb_prefix.json.count > 0
+
+    - name: Delete IPs from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/{{ item.id }}/"
+        method: DELETE
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        status_code: 204
+      loop: "{{ nb_ips.json.results }}"
+      loop_control:
+        label: "{{ item.address }}"
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_ips is not skipped
+        - nb_ips.json.count > 0
+
+    - name: Delete prefix from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ nb_prefix.json.results[0].id }}/"
+        method: DELETE
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        status_code: 204
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_prefix is not skipped
+        - nb_prefix.json.count > 0
+
+    - name: Delete VLAN from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/{{ nb_vlan.json.results[0].id }}/"
+        method: DELETE
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        status_code: 204
+      delegate_to: localhost
+      run_once: true
+      when:
+        - nb_vlan is succeeded
+        - nb_vlan.json.count > 0
+
+    - name: Show NetBox cleanup result
+      ansible.builtin.debug:
+        msg: "NetBox: Deleted VLAN {{ vlan_id }}{{ (nb_prefix is not skipped and nb_prefix.json.count > 0) | ternary(' + prefix ' + nb_prefix.json.results[0].prefix, '') }}{{ (nb_ips is not skipped and nb_ips.json.count > 0) | ternary(' + ' + (nb_ips.json.count | string) + ' IPs', '') }}"
+      run_once: true
+      when:
+        - nb_vlan is succeeded
+        - nb_vlan.json.count > 0
