@@ -1,0 +1,185 @@
+---
+- name: Create VLAN on ILBS devices from NetBox (source of truth)
+  hosts: RTR_ILBS_1,RTR_ILBS_2,SW_ILBS_1,SW_ILBS_2
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+    netbox_url: "http://netbox:8080"
+    netbox_token: "0123456789abcdef0123456789abcdef01234567"
+    reference_vlan: 1242
+
+  tasks:
+    # ── Input Validation ─────────────────────────────────────
+    - name: Validate vlan_id
+      ansible.builtin.assert:
+        that:
+          - vlan_id is defined
+          - vlan_id | int > 0
+          - vlan_id | int < 4095
+        fail_msg: "vlan_id must be a valid VLAN ID (1-4094)"
+      run_once: true
+
+    - name: Calculate VRRP ID
+      ansible.builtin.set_fact:
+        vrrp_id: "{{ vlan_id | int - 1000 }}"
+      run_once: true
+
+    - name: Validate VRRP ID range
+      ansible.builtin.assert:
+        that:
+          - vrrp_id | int > 0
+          - vrrp_id | int < 256
+        fail_msg: "VRID {{ vrrp_id }} out of range (1-255). VLAN ID must be 1001-1255."
+      run_once: true
+
+    # ── NetBox: VLAN Lookup & Validation ─────────────────────
+    - name: Look up VLAN in NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?vid={{ vlan_id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_vlan
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fail if VLAN does not exist in NetBox
+      ansible.builtin.fail:
+        msg: >-
+          VLAN {{ vlan_id }} does not exist in NetBox.
+          Please create the VLAN in NetBox first before running this playbook.
+      when: nb_vlan.json.count == 0
+      run_once: true
+
+    - name: Fail if VLAN status is not Reserved
+      ansible.builtin.fail:
+        msg: >-
+          VLAN {{ vlan_id }} exists in NetBox but has status
+          "{{ nb_vlan.json.results[0].status.label }}" instead of "Reserved".
+          Only VLANs with status "Reserved" can be deployed.
+      when: nb_vlan.json.results[0].status.value != "reserved"
+      run_once: true
+
+    # ── NetBox: Prefix Lookup ────────────────────────────────
+    - name: Look up prefix for VLAN in NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?vlan_id={{ nb_vlan.json.results[0].id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_prefix
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fail if no prefix assigned to VLAN
+      ansible.builtin.fail:
+        msg: >-
+          VLAN {{ vlan_id }} exists in NetBox but has no prefix assigned.
+          Please assign a prefix to the VLAN in NetBox before running this playbook.
+      when: nb_prefix.json.count == 0
+      run_once: true
+
+    - name: Set prefix facts
+      ansible.builtin.set_fact:
+        vlan_prefix_id: "{{ nb_prefix.json.results[0].id }}"
+        vlan_prefix: "{{ nb_prefix.json.results[0].prefix }}"
+      run_once: true
+
+    # ── NetBox: VRRP VIP Lookup ──────────────────────────────
+    - name: Look up VRRP VIP in prefix
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?parent={{ vlan_prefix }}&role=vip&description__ic=VRRP%20VLAN-{{ vlan_id }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        return_content: true
+      register: nb_vip_check
+      delegate_to: localhost
+      run_once: true
+
+    - name: Allocate VRRP VIP from prefix if not pre-defined
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ vlan_prefix_id }}/available-ips/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          status: active
+          role: vip
+          description: "VRRP VLAN-{{ vlan_id }}"
+        status_code: 201
+        return_content: true
+      register: nb_vip_allocated
+      delegate_to: localhost
+      run_once: true
+      when: nb_vip_check.json.count == 0
+
+    - name: Set VRRP VIP fact
+      ansible.builtin.set_fact:
+        vrrp_vip: >-
+          {{ (nb_vip_check.json.count > 0)
+             | ternary(nb_vip_check.json.results[0].address,
+                       nb_vip_allocated.json.address | default('')) }}
+      run_once: true
+
+    # ── Device Detection ─────────────────────────────────────
+    - name: Detect bridge with VLAN filtering
+      community.routeros.command:
+        commands:
+          - /interface bridge print count-only where vlan-filtering=yes
+      register: bridge_count
+
+    - name: Detect existing VLAN sub-interfaces
+      community.routeros.command:
+        commands:
+          - /interface vlan print count-only
+      register: vlan_iface_count
+
+    - name: Parse detection results
+      ansible.builtin.set_fact:
+        bridge_num: "{{ bridge_count.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+        vlan_iface_num: "{{ vlan_iface_count.stdout[0] | default('0') | trim | split('\n') | last | trim | int }}"
+
+    - name: Set device type facts
+      ansible.builtin.set_fact:
+        is_switch: "{{ bridge_num | int > 0 }}"
+        is_router: "{{ vlan_iface_num | int > 0 and bridge_num | int == 0 }}"
+
+    - name: Skip device without VLAN capability
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has no bridge or VLAN interfaces — skipping"
+      when: not (is_switch | bool) and not (is_router | bool)
+
+    # ── Device Configuration ─────────────────────────────────
+    - name: Include switch VLAN tasks
+      ansible.builtin.include_tasks: _vlan_switch.yml
+      when: is_switch | bool
+
+    - name: Include router VLAN tasks
+      ansible.builtin.include_tasks: _vlan_router.yml
+      when: is_router | bool
+
+    # ── NetBox: Update VLAN Status to Active ─────────────────
+    - name: Update VLAN status to Active in NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/{{ nb_vlan.json.results[0].id }}/"
+        method: PATCH
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          status: active
+        status_code: 200
+        return_content: true
+      delegate_to: localhost
+      run_once: true
+
+    - name: Confirm VLAN deployment
+      ansible.builtin.debug:
+        msg: "VLAN {{ vlan_id }} successfully deployed and status updated to Active in NetBox"
+      run_once: true
