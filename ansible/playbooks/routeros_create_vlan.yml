@@ -1,6 +1,6 @@
 ---
 - name: Create VLAN on all network devices
-  hosts: all
+  hosts: RTR_ILBS_1,RTR_ILBS_2,SW_ILBS_1,SW_ILBS_2
   gather_facts: false
   connection: ansible.netcommon.network_cli
   vars:

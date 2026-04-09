@@ -1,0 +1,5 @@
+FROM semaphoreui/semaphore:v2.12.4
+
+USER root
+RUN pip3 install --no-cache-dir pytz pynetbox paramiko
+USER semaphore

@@ -85,7 +85,10 @@ services:
   # Semaphore - Ansible UI
   # ============================================================
   semaphore:
-    image: semaphoreui/semaphore:v2.12.4
+    build:
+      context: .
+      dockerfile: Dockerfile.semaphore
+    image: eve-ng-semaphore:latest
     depends_on:
       semaphore-db:
         condition: service_healthy
@@ -100,6 +103,7 @@ services:
       SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:-admin}
       SEMAPHORE_ADMIN_NAME: Admin
       SEMAPHORE_ADMIN_EMAIL: admin@localhost
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION}
     volumes:
       - semaphore-data:/var/lib/semaphore
       - ./ansible:/opt/semaphore/playbooks

@@ -40,13 +40,15 @@ eve-ng-management/
 ├── docker-compose.yml          # NetBox + Semaphore Services
 ├── netbox.env                  # NetBox Umgebungsvariablen
 ├── import_to_netbox.py         # Automatischer Import: RouterOS → NetBox
+├── create_dhcp_relay_lab.py    # DHCP-Relay Demo-Lab erstellen
 ├── ansible/
 │   ├── requirements.yml        # Ansible Collections (routeros, netbox)
 │   ├── inventory/
 │   │   └── netbox.yml          # NetBox Dynamic Inventory Plugin
 │   └── playbooks/
 │       ├── routeros_basic.yml           # System-Info + Interfaces abfragen
-│       └── routeros_configure_ips.yml   # IPs aus NetBox auf Router anwenden
+│       ├── routeros_configure_ips.yml   # IPs aus NetBox auf Router anwenden
+│       └── routeros_dhcp_relay.yml      # DHCP-Relay Config aus NetBox anwenden
 └── README.md
 ```
 
@@ -87,6 +89,102 @@ Das Skript:
 - Erstellt in NetBox: Site, Manufacturer, Device Type, Roles, Platform
 - Importiert alle Devices mit Interfaces und IP-Adressen
 - Setzt die Management-IP als Primary IP
+
+## DHCP-Relay Demo-Lab
+
+Ein eigenständiges zweites Lab in EVE-NG, das das Konzept von **DHCP Relay** demonstriert.
+
+### Konzept
+
+Wenn sich DHCP-Server und Client in unterschiedlichen Subnetzen befinden, kann der Client keine DHCP-Broadcasts an den Server senden. Ein **DHCP Relay Agent** auf dem Router zwischen den Subnetzen fängt die Broadcasts ab und leitet sie als Unicast an den DHCP-Server weiter.
+
+### Topologie
+
+```
+[DHCP-Client]          [Relay-Router]              [DHCP-Server]
+   (VPCS)                (RouterOS)                  (RouterOS)
+     │                   │         │                     │
+     └───── 10.0.1.0/24 ─┘         └──── 10.0.2.0/24 ───┘
+           Client-Net                    Server-Net
+```
+
+### Nodes
+
+| Node          | Typ      | Interfaces                                                      | Rolle                          |
+|--------------|----------|-----------------------------------------------------------------|--------------------------------|
+| DHCP-Server  | RouterOS | ether1: 10.0.2.1/24, ether2: 192.168.56.21/24 (mgmt)           | DHCP-Server für 10.0.1.0/24    |
+| Relay-Router | RouterOS | ether1: 10.0.1.1/24, ether2: 10.0.2.2/24, ether3: 192.168.56.22/24 (mgmt) | DHCP Relay Agent   |
+| DHCP-Client  | VPCS     | eth0: per DHCP (10.0.1.100-200)                                 | DHCP-Client                    |
+
+### Konfigurationsdetails
+
+**DHCP-Server:**
+- IP-Pool: `10.0.1.100-10.0.1.200`
+- Netzwerk: `10.0.1.0/24`, Gateway `10.0.1.1`, DNS `8.8.8.8`
+- `relay=10.0.1.1` — akzeptiert Relay-Anfragen mit dieser giaddr
+- Statische Route: `10.0.1.0/24` via `10.0.2.2`
+- Management: `192.168.56.21/24` auf `ether2` (pnet1)
+
+**Relay-Router:**
+- DHCP Relay auf `ether1`, leitet an `10.0.2.1` weiter
+- `local-address=10.0.1.1` als giaddr in Relay-Paketen
+- Management: `192.168.56.22/24` auf `ether3` (pnet1)
+
+**DHCP-Client:**
+- Erhält per `ip dhcp` automatisch eine IP aus `10.0.1.100-200`
+
+### Lab erstellen
+
+```bash
+python3 create_dhcp_relay_lab.py
+```
+
+Das Skript:
+1. Erstellt die Lab-Datei (`dhcp-relay.unl`) direkt auf der EVE-NG VM
+2. Startet alle 3 Nodes über die EVE-NG REST API
+3. Konfiguriert die RouterOS-Nodes via Telnet (inkl. First-Boot Passwort-Setup)
+4. Löst DHCP auf dem VPCS-Client aus und verifiziert den Lease
+
+**Voraussetzung:** EVE-NG VM läuft und ist per SSH erreichbar (`ssh -p 2222 root@localhost`).
+
+### NetBox als Source of Truth
+
+Die gesamte DHCP-Relay Konfiguration ist in NetBox hinterlegt und kann jederzeit über Semaphore/Ansible erneut auf die Router angewendet werden.
+
+**Tags:**
+
+| Tag              | Zugewiesen an   | Zweck                              |
+|-----------------|----------------|------------------------------------|
+| `dhcp-relay-lab` | Alle 3 Devices  | Identifiziert das Lab              |
+| `dhcp-server`    | DHCP-Server     | Config Context: DHCP Server Config |
+| `dhcp-relay`     | Relay-Router    | Config Context: DHCP Relay Config  |
+| `dhcp-client`    | DHCP-Client     | Config Context: DHCP Client Config |
+
+**Config Contexts** (automatisch via Tags zugewiesen):
+
+- **DHCP Server Config** → Tag `dhcp-server`: DHCP-Pools, Netzwerke, Server-Instanzen, statische Routen
+- **DHCP Relay Config** → Tag `dhcp-relay`: Relay-Einträge (Interface, Server, Local-Address)
+- **DHCP Client Config** → Tag `dhcp-client`: Client-Interface und Methode
+
+**Ansible Playbook:**
+
+```bash
+# Über Semaphore oder CLI:
+ansible-playbook ansible/playbooks/routeros_dhcp_relay.yml -l tag_dhcp_relay_lab
+```
+
+Das Playbook `routeros_dhcp_relay.yml` liest die Config Contexts aus NetBox und wendet an:
+1. System-Identity setzen
+2. Standard-DHCP-Clients entfernen
+3. IP-Adressen aus NetBox IPAM
+4. Statische Routen
+5. DHCP-Server (Pools, Netzwerke, Server-Instanzen) oder DHCP-Relay Einträge
+
+### Lab im Browser öffnen
+
+Nach dem Erstellen: http://localhost:8080 → Lab `dhcp-relay` öffnen.
+
+**Login auf RouterOS-Nodes:** `admin` / `admin`
 
 ## Netzwerk-Architektur
 

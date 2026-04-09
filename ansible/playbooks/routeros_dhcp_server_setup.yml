@@ -1,0 +1,199 @@
+---
+# DHCP-Server auf dem DHCP_Server-Router einrichten.
+#
+# Konfiguriert:
+#   - IP-Adressen auf den Link-Interfaces zu Rtr_ILBS_1 und Rtr_ILBS_2
+#   - IP-Pools für die DHCP-Adressbereiche
+#   - DHCP-Server-Netzwerke (Subnetz, Gateway, DNS)
+#   - DHCP-Server-Instanzen auf den Link-Interfaces
+#   - Statische Routen zu den Client-Subnetzen
+#
+# Nutzung:
+#   ansible-playbook routeros_dhcp_server_setup.yml -i inventory/dhcp_server_lab.ini
+#
+- name: DHCP-Server auf DHCP_Server-Router einrichten
+  hosts: dhcp_server
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+
+    # Link-Interfaces zum jeweiligen Router
+    links:
+      - interface: ether1
+        address: "10.10.1.1/30"
+        comment: "Link zu Rtr_ILBS_1"
+      - interface: ether2
+        address: "10.10.2.1/30"
+        comment: "Link zu Rtr_ILBS_2"
+
+    # DHCP-Pools
+    dhcp_pools:
+      - name: pool-vlan1241
+        ranges: "172.18.255.228-172.18.255.254"
+      - name: pool-vlan1242
+        ranges: "172.18.255.196-172.18.255.222"
+
+    # DHCP-Server-Netzwerke (werden über giaddr des Relay-Agents zugeordnet)
+    dhcp_networks:
+      - address: "172.18.255.224/27"
+        gateway: "172.18.255.225"
+        dns_server: "8.8.8.8"
+        comment: "VLAN-1241"
+      - address: "172.18.255.192/27"
+        gateway: "172.18.255.193"
+        dns_server: "8.8.8.8"
+        comment: "VLAN-1242"
+
+    # DHCP-Server-Instanzen
+    dhcp_servers:
+      - name: dhcp-rtr1
+        interface: ether1
+        pool: pool-vlan1241
+      - name: dhcp-rtr2
+        interface: ether2
+        pool: pool-vlan1242
+
+    # Statische Routen zu den Client-Subnetzen
+    static_routes:
+      - dst: "172.18.255.224/27"
+        gateway: "10.10.1.2"
+        comment: "VLAN-1241 via Rtr_ILBS_1"
+      - dst: "172.18.255.192/27"
+        gateway: "10.10.2.2"
+        comment: "VLAN-1242 via Rtr_ILBS_2"
+
+  tasks:
+    # ── IP-Adressen auf Link-Interfaces ──────────────────────────────
+    - name: Aktuelle IP-Adressen abfragen
+      community.routeros.command:
+        commands:
+          - /ip address print without-paging
+      register: current_ips
+
+    - name: IP-Adressen auf Link-Interfaces setzen
+      community.routeros.command:
+        commands:
+          - >-
+            /ip address add
+            address={{ item.address }}
+            interface={{ item.interface }}
+            comment="{{ item.comment }}"
+      loop: "{{ links }}"
+      when: item.address not in (current_ips.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item.address }} auf {{ item.interface }}"
+
+    # ── IP-Pools ─────────────────────────────────────────────────────
+    - name: Aktuelle IP-Pools abfragen
+      community.routeros.command:
+        commands:
+          - /ip pool print without-paging
+      register: current_pools
+
+    - name: IP-Pools erstellen
+      community.routeros.command:
+        commands:
+          - >-
+            /ip pool add
+            name={{ item.name }}
+            ranges={{ item.ranges }}
+      loop: "{{ dhcp_pools }}"
+      when: item.name not in (current_pools.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ── DHCP-Server-Netzwerke ────────────────────────────────────────
+    - name: Aktuelle DHCP-Netzwerke abfragen
+      community.routeros.command:
+        commands:
+          - /ip dhcp-server network print without-paging
+      register: current_networks
+
+    - name: DHCP-Server-Netzwerke erstellen
+      community.routeros.command:
+        commands:
+          - >-
+            /ip dhcp-server network add
+            address={{ item.address }}
+            gateway={{ item.gateway }}
+            dns-server={{ item.dns_server }}
+            comment="{{ item.comment }}"
+      loop: "{{ dhcp_networks }}"
+      when: item.address not in (current_networks.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item.address }} ({{ item.comment }})"
+
+    # ── DHCP-Server-Instanzen ────────────────────────────────────────
+    - name: Aktuelle DHCP-Server abfragen
+      community.routeros.command:
+        commands:
+          - /ip dhcp-server print without-paging
+      register: current_dhcp
+
+    - name: DHCP-Server-Instanzen erstellen
+      community.routeros.command:
+        commands:
+          - >-
+            /ip dhcp-server add
+            name={{ item.name }}
+            interface={{ item.interface }}
+            address-pool={{ item.pool }}
+            disabled=no
+      loop: "{{ dhcp_servers }}"
+      when: item.name not in (current_dhcp.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item.name }} auf {{ item.interface }}"
+
+    # ── Statische Routen ─────────────────────────────────────────────
+    - name: Aktuelle Routen abfragen
+      community.routeros.command:
+        commands:
+          - /ip route print without-paging
+      register: current_routes
+
+    - name: Statische Routen hinzufügen
+      community.routeros.command:
+        commands:
+          - >-
+            /ip route add
+            dst-address={{ item.dst }}
+            gateway={{ item.gateway }}
+            comment="{{ item.comment }}"
+      loop: "{{ static_routes }}"
+      when: item.dst not in (current_routes.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item.dst }} via {{ item.gateway }}"
+
+    # ── Ergebnis anzeigen ────────────────────────────────────────────
+    - name: Finale IP-Konfiguration abfragen
+      community.routeros.command:
+        commands:
+          - /ip address print without-paging
+          - /ip pool print without-paging
+          - /ip dhcp-server print without-paging
+          - /ip dhcp-server network print without-paging
+          - /ip route print without-paging
+      register: final_config
+
+    - name: IP-Adressen
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[0]
+
+    - name: IP-Pools
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[1]
+
+    - name: DHCP-Server
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[2]
+
+    - name: DHCP-Netzwerke
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[3]
+
+    - name: Routen
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[4]

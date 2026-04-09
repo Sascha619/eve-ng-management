@@ -1,0 +1,91 @@
+---
+# DHCP-Relay auf dem Relay-Router aktivieren oder deaktivieren.
+#
+# Der User wird gefragt, ob ein Relay gewünscht ist.
+#   - ja  → DHCP-Relay wird auf dem Relay-Router eingerichtet
+#   - nein → vorhandenes DHCP-Relay wird entfernt
+#
+# Nutzung:
+#   ansible-playbook routeros_dhcp_relay.yml -i inventory/dhcp_relay_lab.ini
+#
+- name: DHCP-Relay auf Relay-Router verwalten
+  hosts: relay_router
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+    relay_name: relay1
+    relay_interface: ether1
+    relay_dhcp_server: 10.0.2.1
+    relay_local_address: 10.0.1.1
+
+  vars_prompt:
+    - name: enable_relay
+      prompt: "DHCP-Relay auf dem Relay-Router aktivieren? (ja/nein)"
+      default: "ja"
+      private: false
+
+  tasks:
+    # ── Aktuellen Zustand prüfen ────────────────────────────────────
+    - name: DHCP-Relay Status abfragen
+      community.routeros.command:
+        commands:
+          - /ip dhcp-relay print without-paging
+      register: relay_status
+
+    - name: Prüfen ob Relay bereits existiert
+      ansible.builtin.set_fact:
+        relay_exists: "{{ relay_name in (relay_status.stdout[0] | default('')) }}"
+
+    # ── Relay aktivieren ────────────────────────────────────────────
+    - name: DHCP-Relay einrichten
+      community.routeros.command:
+        commands:
+          - >-
+            /ip dhcp-relay add
+            name={{ relay_name }}
+            interface={{ relay_interface }}
+            dhcp-server={{ relay_dhcp_server }}
+            local-address={{ relay_local_address }}
+            disabled=no
+      when:
+        - enable_relay | lower in ['ja', 'yes', 'j', 'y']
+        - not relay_exists
+      register: relay_added
+
+    - name: Info – Relay bereits vorhanden
+      ansible.builtin.debug:
+        msg: "DHCP-Relay '{{ relay_name }}' ist bereits konfiguriert."
+      when:
+        - enable_relay | lower in ['ja', 'yes', 'j', 'y']
+        - relay_exists
+
+    # ── Relay deaktivieren ──────────────────────────────────────────
+    - name: DHCP-Relay entfernen
+      community.routeros.command:
+        commands:
+          - "/ip dhcp-relay remove [find name={{ relay_name }}]"
+      when:
+        - enable_relay | lower in ['nein', 'no', 'n']
+        - relay_exists
+      register: relay_removed
+
+    - name: Info – kein Relay vorhanden
+      ansible.builtin.debug:
+        msg: "Kein DHCP-Relay '{{ relay_name }}' vorhanden – nichts zu entfernen."
+      when:
+        - enable_relay | lower in ['nein', 'no', 'n']
+        - not relay_exists
+
+    # ── Ergebnis anzeigen ───────────────────────────────────────────
+    - name: Aktuellen DHCP-Relay Status anzeigen
+      community.routeros.command:
+        commands:
+          - /ip dhcp-relay print without-paging
+      register: final_relay
+
+    - name: DHCP-Relay Konfiguration
+      ansible.builtin.debug:
+        var: final_relay.stdout_lines

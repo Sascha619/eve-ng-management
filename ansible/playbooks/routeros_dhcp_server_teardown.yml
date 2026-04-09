@@ -1,0 +1,158 @@
+---
+# DHCP-Server-Konfiguration vom DHCP_Server-Router entfernen.
+#
+# Entfernt:
+#   - DHCP-Server-Instanzen
+#   - DHCP-Server-Netzwerke
+#   - IP-Pools
+#   - Statische Routen zu den Client-Subnetzen
+#   - IP-Adressen auf den Link-Interfaces
+#
+# Nutzung:
+#   ansible-playbook routeros_dhcp_server_teardown.yml -i inventory/dhcp_server_lab.ini
+#
+- name: DHCP-Server-Konfiguration entfernen
+  hosts: dhcp_server
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: community.routeros.routeros
+    ansible_user: admin
+    ansible_password: admin
+
+    # Namen der zu entfernenden DHCP-Server-Instanzen
+    dhcp_server_names:
+      - dhcp-rtr1
+      - dhcp-rtr2
+
+    # Namen der zu entfernenden IP-Pools
+    pool_names:
+      - pool-vlan1241
+      - pool-vlan1242
+
+    # Zu entfernende DHCP-Netzwerke (Gateway als Identifier)
+    dhcp_network_gateways:
+      - "172.18.255.225"
+      - "172.18.255.193"
+
+    # Zu entfernende statische Routen (Comment als Identifier)
+    route_comments:
+      - "VLAN-1241 via Rtr_ILBS_1"
+      - "VLAN-1242 via Rtr_ILBS_2"
+
+    # Zu entfernende IP-Adressen (Comment als Identifier)
+    link_comments:
+      - "Link zu Rtr_ILBS_1"
+      - "Link zu Rtr_ILBS_2"
+
+  tasks:
+    # ── DHCP-Server-Instanzen entfernen ──────────────────────────────
+    - name: Aktuelle DHCP-Server abfragen
+      community.routeros.command:
+        commands:
+          - /ip dhcp-server print without-paging
+      register: current_dhcp
+
+    - name: DHCP-Server-Instanzen entfernen
+      community.routeros.command:
+        commands:
+          - "/ip dhcp-server remove [find name={{ item }}]"
+      loop: "{{ dhcp_server_names }}"
+      when: item in (current_dhcp.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item }}"
+
+    # ── DHCP-Server-Netzwerke entfernen ──────────────────────────────
+    - name: Aktuelle DHCP-Netzwerke abfragen
+      community.routeros.command:
+        commands:
+          - /ip dhcp-server network print without-paging
+      register: current_networks
+
+    - name: DHCP-Server-Netzwerke entfernen
+      community.routeros.command:
+        commands:
+          - "/ip dhcp-server network remove [find gateway={{ item }}]"
+      loop: "{{ dhcp_network_gateways }}"
+      when: item in (current_networks.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item }}"
+
+    # ── IP-Pools entfernen ───────────────────────────────────────────
+    - name: Aktuelle IP-Pools abfragen
+      community.routeros.command:
+        commands:
+          - /ip pool print without-paging
+      register: current_pools
+
+    - name: IP-Pools entfernen
+      community.routeros.command:
+        commands:
+          - "/ip pool remove [find name={{ item }}]"
+      loop: "{{ pool_names }}"
+      when: item in (current_pools.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item }}"
+
+    # ── Statische Routen entfernen ───────────────────────────────────
+    - name: Aktuelle Routen abfragen
+      community.routeros.command:
+        commands:
+          - /ip route print without-paging
+      register: current_routes
+
+    - name: Statische Routen entfernen
+      community.routeros.command:
+        commands:
+          - '/ip route remove [find comment="{{ item }}"]'
+      loop: "{{ route_comments }}"
+      when: item in (current_routes.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item }}"
+
+    # ── IP-Adressen auf Link-Interfaces entfernen ────────────────────
+    - name: Aktuelle IP-Adressen abfragen
+      community.routeros.command:
+        commands:
+          - /ip address print without-paging
+      register: current_ips
+
+    - name: IP-Adressen auf Link-Interfaces entfernen
+      community.routeros.command:
+        commands:
+          - '/ip address remove [find comment="{{ item }}"]'
+      loop: "{{ link_comments }}"
+      when: item in (current_ips.stdout[0] | default(''))
+      loop_control:
+        label: "{{ item }}"
+
+    # ── Ergebnis anzeigen ────────────────────────────────────────────
+    - name: Finale Konfiguration abfragen
+      community.routeros.command:
+        commands:
+          - /ip address print without-paging
+          - /ip pool print without-paging
+          - /ip dhcp-server print without-paging
+          - /ip dhcp-server network print without-paging
+          - /ip route print without-paging
+      register: final_config
+
+    - name: IP-Adressen
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[0]
+
+    - name: IP-Pools
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[1]
+
+    - name: DHCP-Server
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[2]
+
+    - name: DHCP-Netzwerke
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[3]
+
+    - name: Routen
+      ansible.builtin.debug:
+        var: final_config.stdout_lines[4]
