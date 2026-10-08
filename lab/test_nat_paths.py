@@ -185,9 +185,9 @@ def main(argv=None) -> int:
                 verdict = ("OK" if got == want else "UNERWARTET") + note
                 unexpected += got != want
                 print(f"  {name:<11} ({pr['vrf']}, {pr['src']}) -> {label:<28} {res['received']}/3  {verdict}")
-        if topo.get("pve_mgmt"):
-            res = ping("it-fw", topo["pve_mgmt"], "main", main_client["src"])
-            print(f"  {'moa-pc-Netz':<11} (main, {main_client['src']}) -> PVE-Mgmt {topo['pve_mgmt']:<19} "
+        for mgmt in topo.get("pve_mgmt") or []:
+            res = ping("it-fw", mgmt, "main", main_client["src"])
+            print(f"  {'moa-pc-Netz':<11} (main, {main_client['src']}) -> PVE-Mgmt {mgmt:<19} "
                   f"{res['received']}/3  {'OK' if res['received'] else 'UNERWARTET'}")
             unexpected += not res["received"]
 

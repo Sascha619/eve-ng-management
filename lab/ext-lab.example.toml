@@ -53,17 +53,28 @@ address = "192.0.2.246/30"
 gateway = "192.0.2.245"
 hosts_in = ["192.0.2.0/25"]
 
-# VM-Ersatz am PVE-Bond: Mgmt untagged, VMs als VRFs auf VLANs.
-[pve]
-node = "pve"
+# PVE-Knoten aus Netzsicht (je einer pro Knoten): Anschluss am Public-Bond,
+# Mgmt untagged. Mit vms: VLAN-Bridge wie vmbr0, je VM eine Probe-VRF
+# (address, für test_nat_paths.py) und optional ein VPC zum Anklicken (vpc).
+[[pve]]
+node = "pve-a"
 mgmt = "10.0.2.115"
-pos = [100, 400]
+pos = [160, 180]
 attach = "sw-ilbs-01:pve-ilbs-cn-01-public-mlag-eno1np0"
 address = "192.0.2.230/27"
 gateway = "192.0.2.225"
 vms = [
-  { name = "vm-a", vlan = 1254, address = "198.51.100.40/26", gateway = "198.51.100.1" },
+  { name = "vm-a", vlan = 1254, address = "198.51.100.40/26", gateway = "198.51.100.1", vpc = "198.51.100.41/26", vpc_pos = [330, 140] },
 ]
+
+# Layout im EVE-Canvas (create_ilbs_lab.py --relayout): Mgmt-Wolken je Gruppe
+# (alle auf pnet0, nur optisch getrennt) und beschriftete Rahmen
+# [left, top, Breite, Höhe]. CHRs ohne Wolke hängen an "Mgmt ILBS".
+[clouds]
+"Mgmt Site A" = { pos = [30, 1160], nodes = ["site-a--tnr1", "site-a--tnr2", "site-a-lan"] }
+
+[frames]
+"Testanlagen" = [10, 730, 930, 540]
 
 [tests]
 main_client = { node = "it-fw", ip = "10.0.2.105", src = "172.18.104.1" }

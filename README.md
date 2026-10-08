@@ -211,8 +211,10 @@ exportieren:
 Hinter den ILBS-Routern lassen sich die Testanlagen nachbauen, damit die
 `pve_nat`-Regeln und die VRFs Ende-zu-Ende testbar sind: Backbone (Aruba),
 TNR-Paare je Standort (Cisco, VRRP), Stubs für Gegenstellen ohne Export und
-ein PVE-Ersatz mit VMs in den Testanlagen-VRFs — alles als kleine CHRs
-(256 MB, Mgmt 10.0.2.106–.120).
+die PVE-Knoten aus Netzsicht (Anschluss am Public-Bond, Mgmt-Adresse wie die
+echten Knoten) — alles als kleine CHRs (256 MB, Mgmt 10.0.2.106–.120). Ein
+PVE-Knoten hat eine VLAN-Bridge wie `vmbr0` mit VMs in den Testanlagen-VRFs:
+je eine Probe-VRF (für das Testskript) und ein VPC zum Anklicken.
 
 Namen, Adressen und Anschlusspunkte stehen in `lab/ext-lab.local.toml`
 (gitignored, Kundendaten; Format: `lab/ext-lab.example.toml`). Daraus und aus
@@ -228,13 +230,22 @@ Configs und `configs/ext_topology.json`:
   Default-Route über die VRRP-Adresse) bzw. als /32 auf einem Stub.
   Ziele ohne passendes Netz meldet der Generator.
 - **Clients** sind Probe-VRFs auf den CHRs (per API automatisierbar,
-  überstehen einen TNR-Ausfall); der moa-pc bleibt für Handtests.
+  überstehen einen TNR-Ausfall), z.B. `/ping <ziel> vrf=<probe>`; für
+  Handtests der moa-pc und die VM-VPCs.
+- Jede generierte `.rsc` entfernt den DHCP-Client auf ether1 — nach einem
+  Reset legt der CHR ihn wieder an, und dessen Default-Route über 10.0.2.1
+  stünde per ECMP neben den Lab-Routen.
 
 ```bash
 lab/gen_ext_config.py
 lab/create_ilbs_lab.py          # ergänzt Nodes/Links, Bootstrap, Import
 ~/Repos/ansible-tam/.venv/bin/python lab/test_nat_paths.py
 ```
+
+Im Canvas hängt jede Gruppe an einer eigenen Mgmt-Wolke (alle auf `pnet0`,
+nur optisch getrennt) und steht in einem beschrifteten Rahmen;
+`lab/create_ilbs_lab.py --relayout` setzt Positionen, Wolken und Rahmen neu
+(Rahmen von Hand angepasst? `--relayout` überschreibt sie).
 
 EVE CE verbindet laufende Nodes nicht mit neuen Links; `create_ilbs_lab.py`
 hängt deren TAP-Interfaces direkt an die Link-Bridge (nach einem Neustart

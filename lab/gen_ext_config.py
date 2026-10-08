@@ -25,7 +25,8 @@ Nachbau (nur L3, was für Routing und NAT zählt):
   Host-Adressen und Default-Route über die VRRP-Adresse.
 - Stubs (Gegenstellen ohne Export): Uplink-Adressen + Default-Route zurück,
   Zielhosts als /32 auf einer Loopback-Bridge.
-- PVE: Bond zum PVE-Port des Switches, Mgmt untagged, VMs als VRFs auf VLANs.
+- PVE: Bond zum PVE-Port des Switches, Mgmt untagged; mit VMs eine VLAN-Bridge
+  wie vmbr0: VMs als Probe-VRFs und als VPCs an Access-Ports.
 
 Jede .rsc setzt ihre Mgmt-IP selbst (für Re-Import per reset-configuration).
 
@@ -185,6 +186,9 @@ class Rsc:
             f"# Lab-Konfiguration für {node}, generiert von gen_ext_config.py",
             f"# aus {source} — nicht von Hand ändern, neu generieren.",
             ":delay 5s",  # run-after-reset: Interfaces erst hochkommen lassen
+            # Nach einem Reset legt der CHR wieder einen DHCP-Client an — dessen
+            # Default-Route über 10.0.2.1 stünde per ECMP neben den Lab-Routen.
+            "/ip dhcp-client remove [find]",
             f':if ([:len [/ip address find address="{mgmt}/24"]] = 0) do={{'
             f"/ip address add address={mgmt}/24 interface=ether1 comment=lab-mgmt}}",
             "/ip service set api disabled=no",
@@ -439,27 +443,53 @@ def main(argv=None) -> int:
         rsc.write()
 
     # ── PVE ──
-    pve = spec.get("pve")
-    if pve:
+    vpcs, pve_mgmt = {}, []
+    for pve in spec.get("pve", []):
         add_node(pve["node"], pve, "pve")
         rsc = Rsc(pve["node"], pve["mgmt"], "ext-lab.local.toml")
         dev, sp = attach(pve["attach"])
         port = rsc.port(sp.rsplit("-", 1)[-1], f"zu {dev} {sp}")
         links.append([[pve["node"], port], [dev, sp]])
         rsc.add("/interface bonding", f"add lacp-rate=1sec mode=802.3ad name=bond0 slaves={port}")
-        rsc.add("/interface vlan", *[f"add interface=bond0 name=vlan{vm['vlan']} vlan-id={vm['vlan']} comment={vm['name']}"
-                                     for vm in pve["vms"]])
-        for vm in pve["vms"]:
-            rsc.vrf(vm["name"], [f"vlan{vm['vlan']}"])
+        vms = pve.get("vms", [])
+        mgmt_if = "bond0"
+        if vms:
+            # Wie vmbr0 (VLAN-aware) auf dem PVE: Mgmt untagged auf dem Bond,
+            # VM-VLANs getaggt, VPCs als VMs an Access-Ports. Kein STP — ein
+            # PVE nimmt nicht am STP der ILBS-Switches teil.
+            mgmt_if = "vmbr0"
+            vpc_ports = []
+            for vm in vms:
+                if "vpc" in vm:
+                    # tap-<vm> wie die VM-NICs auf dem PVE; nicht <vm> — so heißt schon das VRF.
+                    vpc_ports.append((vm, rsc.port(f"tap-{vm['name']}", f"VPC {vm['name']} (VLAN {vm['vlan']})")))
+            rsc.add("/interface bridge", 'add name=vmbr0 protocol-mode=none vlan-filtering=yes comment="wie PVE vmbr0"')
+            rsc.add("/interface bridge port", "add bridge=vmbr0 interface=bond0",
+                    *[f"add bridge=vmbr0 interface={p} pvid={vm['vlan']} frame-types=admit-only-untagged-and-priority-tagged"
+                      for vm, p in vpc_ports])
+            rsc.add("/interface bridge vlan", *[
+                f"add bridge=vmbr0 tagged=vmbr0,bond0 vlan-ids={vm['vlan']}"
+                + "".join(f" untagged={p}" for v, p in vpc_ports if v is vm) for vm in vms])
+            rsc.add("/interface vlan", *[f"add interface=vmbr0 name=vlan{vm['vlan']} vlan-id={vm['vlan']} comment={vm['name']}"
+                                         for vm in vms])
+            for vm in vms:
+                rsc.vrf(vm["name"], [f"vlan{vm['vlan']}"])
+            for vm, p in vpc_ports:
+                ip, gw = vm["vpc"], vm["gateway"]
+                vpcs[vm["name"]] = {"pos": vm["vpc_pos"], "config": f"set pcname {vm['name']}\nip {ip} {gw}\n"}
+                links.append([[pve["node"], p], [vm["name"], "eth0"]])
+                devices[ip.split("/")[0]] = vm["name"]
         rsc.add("/ip address",
-                f"add address={pve['address']} interface=bond0 comment=\"PVE-Mgmt (untagged)\"",
-                *[f"add address={vm['address']} interface=vlan{vm['vlan']} comment={vm['name']}" for vm in pve["vms"]])
+                f"add address={pve['address']} interface={mgmt_if} comment=\"PVE-Mgmt (untagged)\"",
+                *[f"add address={vm['address']} interface=vlan{vm['vlan']} comment=\"Lab-Probe {vm['name']}\""
+                  for vm in vms])
         rsc.add("/ip route", f"add dst-address=0.0.0.0/0 gateway={pve['gateway']}",
                 *[f"add dst-address=0.0.0.0/0 gateway={vm['gateway']}@{vm['name']} routing-table={vm['name']}"
-                  for vm in pve["vms"]])
+                  for vm in vms])
         rsc.write()
         devices[pve["address"].split("/")[0]] = pve["node"]
-        for vm in pve["vms"]:
+        pve_mgmt.append(pve["address"].split("/")[0])
+        for vm in vms:
             probes[vm["name"]] = {"node": pve["node"], "vrf": vm["name"], "src": vm["address"].split("/")[0],
                                   "gateway": vm["gateway"], "vm_vlan": vm["vlan"]}
 
@@ -475,7 +505,8 @@ def main(argv=None) -> int:
         "hosts": hosts, "devices": {b: devices[b] for b, _ in backends if b in devices},
         "known_hosts": sorted(known), "expect_unreachable": tests.get("expect_unreachable", []),
         "main_client": tests.get("main_client"),
-        "pve_mgmt": pve["address"].split("/")[0] if pve else None,
+        "pve_mgmt": pve_mgmt, "vpcs": vpcs,
+        "clouds": spec.get("clouds", {}), "frames": spec.get("frames", {}),
     }
     (CONFIG_DIR / "ext_topology.json").write_text(json.dumps(topo, indent=2) + "\n")
 

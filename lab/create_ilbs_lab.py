@@ -25,9 +25,11 @@ Aufruf:
   ./create_ilbs_lab.py              # alles
   ./create_ilbs_lab.py --recreate   # Lab vorher löschen (Nodes verlieren ihre Config!)
   ./create_ilbs_lab.py --reimport <node>     # Testanlagen-Node neu konfigurieren
+  ./create_ilbs_lab.py --relayout   # Positionen, Mgmt-Wolken und Rahmen neu setzen
 """
 
 import argparse
+import base64
 import http.cookiejar
 import json
 import subprocess
@@ -51,11 +53,11 @@ ROS_USER, ROS_PASSWORD = "admin", "Mikrotik1!"
 
 # Gerät -> Mgmt-IP (wie ansible-tam/ansible/inventory/hosts_lab.yml), Position im EVE-Canvas
 NODES = {
-    "rtr-ilbs-01": {"ip": "10.0.2.101", "pos": (150, 150), "icon": "Router-2D-Gen-White-S.svg"},
-    "rtr-ilbs-02": {"ip": "10.0.2.102", "pos": (750, 150), "icon": "Router-2D-Gen-White-S.svg"},
-    "sw-ilbs-01": {"ip": "10.0.2.103", "pos": (300, 400), "icon": "Switch-2D-L3-Generic-S.svg"},
-    "sw-ilbs-02": {"ip": "10.0.2.104", "pos": (600, 400), "icon": "Switch-2D-L3-Generic-S.svg"},
-    "it-fw": {"ip": "10.0.2.105", "pos": (300, 650), "icon": "Firewall-2D-Generic-S.svg"},
+    "rtr-ilbs-01": {"ip": "10.0.2.101", "pos": (500, 170), "icon": "Router-2D-Gen-White-S.svg"},
+    "rtr-ilbs-02": {"ip": "10.0.2.102", "pos": (1140, 170), "icon": "Router-2D-Gen-White-S.svg"},
+    "sw-ilbs-01": {"ip": "10.0.2.103", "pos": (500, 500), "icon": "Switch-2D-L3-Generic-S.svg"},
+    "sw-ilbs-02": {"ip": "10.0.2.104", "pos": (1140, 500), "icon": "Switch-2D-L3-Generic-S.svg"},
+    "it-fw": {"ip": "10.0.2.105", "pos": (1140, 760), "icon": "Firewall-2D-Generic-S.svg"},
 }
 
 # it-fw ist handgeschrieben (it-fw.rsc), daher Portmap hier statt aus .ports.json.
@@ -64,7 +66,7 @@ IT_FW_PORTS = {"oob": "ether1", "sw-ilbs-01": "ether2", "moa-pc": "ether3"}
 # VPCs (EVE "Virtual PC", nur ping/trace): eine NIC eth0, Konfiguration als
 # Startup-Config.
 VPCS = {
-    "moa-pc": {"pos": (300, 850), "config": "set pcname moa-pc\nip 172.18.104.10/23 172.18.104.1\n"},
+    "moa-pc": {"pos": (1140, 940), "config": "set pcname moa-pc\nip 172.18.104.10/23 172.18.104.1\n"},
 }
 
 # Links über Kunden-Portnamen; aufgelöst über configs/<dev>.ports.json.
@@ -79,13 +81,29 @@ LINKS = [
     (("it-fw", "moa-pc"), ("moa-pc", "eth0")),
 ]
 
-# Testanlagen: Nodes und Links aus gen_ext_config.py (nur generiert, gitignored).
+# Mgmt-Wolken: alle auf pnet0 (Cloud0), je Gruppe eine, damit die ether1-Links
+# kurz bleiben. CHRs ohne Eintrag hängen an der ersten Wolke.
+CLOUDS = {
+    "Mgmt ILBS": {"pos": (820, 30), "nodes": ["rtr-ilbs-01", "rtr-ilbs-02", "sw-ilbs-01", "sw-ilbs-02"]},
+    "Mgmt IT": {"pos": (1300, 760), "nodes": ["it-fw"]},
+}
+
+# Beschriftete Rahmen um Gruppen (EVE-Formen hinter den Nodes): (left, top, Breite, Höhe)
+FRAMES = {
+    "ILBS": (440, 120, 780, 470),
+    "IT-Netz (simuliert)": (1080, 710, 330, 330),
+}
+
+# Testanlagen: Nodes, Links, Wolken, Rahmen aus gen_ext_config.py (nur generiert, gitignored).
 EXT_TOPOLOGY = CONFIG_DIR / "ext_topology.json"
 EXT_NODES: set[str] = set()
 if EXT_TOPOLOGY.exists():
     _ext = json.loads(EXT_TOPOLOGY.read_text())
     NODES.update(_ext["nodes"])
     LINKS += [tuple(tuple(end) for end in link) for link in _ext["links"]]
+    VPCS.update(_ext.get("vpcs", {}))
+    CLOUDS.update(_ext.get("clouds", {}))
+    FRAMES.update({k: tuple(v) for k, v in _ext.get("frames", {}).items()})
     EXT_NODES = set(_ext["nodes"])
 
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
@@ -136,7 +154,61 @@ def eve_iface_id(port: str) -> int:
     return int(port.removeprefix("eth"))
 
 
-def create_lab(eve: Eve, maps, recreate: bool) -> tuple[dict[str, int], list]:
+def ensure_clouds(eve: Eve, networks: dict) -> dict[str, int]:
+    """Je Eintrag in CLOUDS ein pnet0-Netz (Abgleich per Name). Eine pnet0-Wolke
+    mit fremdem Namen (z.B. aus älteren Labs) übernimmt die erste Wolke."""
+    pnet = {n["name"]: int(nid) for nid, n in networks.items() if n["type"] == "pnet0"}
+    clouds = {}
+    for name, cfg in CLOUDS.items():
+        if name in pnet:
+            clouds[name] = pnet[name]
+            continue
+        spare = [nid for n, nid in pnet.items() if n not in CLOUDS and nid not in clouds.values()]
+        if not clouds and spare:
+            eve.call("PUT", eve.lab(f"/networks/{spare[0]}"), {"id": spare[0], "name": name})
+            clouds[name] = spare[0]
+        else:
+            clouds[name] = int(eve.call("POST", eve.lab("/networks"), {
+                "type": "pnet0", "name": name, "left": str(cfg["pos"][0]), "top": str(cfg["pos"][1]),
+                "visibility": 1})["data"]["id"])
+            print(f"  Wolke {name} angelegt")
+    return clouds
+
+
+def cloud_of(dev: str) -> str:
+    return next((name for name, cfg in CLOUDS.items() if dev in cfg["nodes"]), next(iter(CLOUDS)))
+
+
+def apply_layout(eve: Eve, node_ids: dict[str, int], clouds: dict[str, int]):
+    """Nodes und Wolken auf ihre Positionen setzen, Rahmen neu anlegen."""
+    for dev, nid in node_ids.items():
+        left, top = (NODES.get(dev) or VPCS[dev])["pos"]
+        eve.call("PUT", eve.lab(f"/nodes/{nid}"), {"id": nid, "left": str(left), "top": str(top)})
+    for name, nid in clouds.items():
+        left, top = CLOUDS[name]["pos"]
+        eve.call("PUT", eve.lab(f"/networks/{nid}"), {"id": nid, "left": str(left), "top": str(top)})
+    for oid, obj in (eve.call("GET", eve.lab("/textobjects"))["data"] or {}).items():
+        if obj["name"].startswith(("lab-frame:", "lab-label:")):
+            eve.call("DELETE", eve.lab(f"/textobjects/{oid}"))
+    for label, (left, top, width, height) in FRAMES.items():
+        # Format wie die EVE-Oberfläche (themes/default/js/actions.js); IDs setzt sie beim Laden.
+        # z-index 0: hinter den Nodes, die Rahmen fangen keine Klicks ab.
+        frame = (f'<div id="customShape0" class="customShape context-menu" data-path="0" '
+                 f'style="display:inline;z-index:0;position:absolute;left:{left}px;top:{top}px;" '
+                 f'width="{width}px" height="{height}px"><svg width="{width}" height="{height}">'
+                 f'<rect width="{width}" height="{height}" fill="none" stroke-width="2" stroke="#8a9bb0" '
+                 f'stroke-dasharray="10,6"/></svg></div>')
+        text = (f'<div id="customText0" class="customShape customText context-menu" data-path="0" '
+                f'style="display:inline;position:absolute;left:{left + 8}px;top:{top + 4}px; cursor:move; ;z-index:1001;">'
+                f'<p align="left" style="vertical-align:top;color:#5b6b80;font-size:14px;font-weight: bold;">'
+                f'{label}</p></div>')
+        for kind, name, html in (("square", f"lab-frame:{label}", frame), ("text", f"lab-label:{label}", text)):
+            eve.call("POST", eve.lab("/textobjects"), {
+                "name": name, "type": kind, "data": base64.b64encode(html.encode()).decode()})
+    print(f"  {len(node_ids)} Nodes, {len(clouds)} Wolken positioniert, {len(FRAMES)} Rahmen")
+
+
+def create_lab(eve: Eve, maps, recreate: bool) -> tuple[dict[str, int], list, dict[str, int], bool]:
     labs = eve.call("GET", "/api/folders/")["data"]["labs"]
     exists = any(lab["file"] == LAB_PATH for lab in labs)
     if exists and recreate:
@@ -192,18 +264,17 @@ def create_lab(eve: Eve, maps, recreate: bool) -> tuple[dict[str, int], list]:
         eve.call("PUT", eve.lab(f"/nodes/{nid}"), {"id": nid, "config": "1"})
         print(f"  VPC {vpc}: id {nid}")
 
-    cloud = next((int(nid) for nid, net in networks.items() if net["type"] == "pnet0"), None)
-    if cloud is None:
-        cloud = eve.call("POST", eve.lab("/networks"), {
-            "type": "pnet0", "name": "Mgmt 10.0.2.0/24", "left": "450", "top": "20", "visibility": 1,
-        })["data"]["id"]
+    clouds = ensure_clouds(eve, networks)
     # Aktuelle Belegung: network_id 0 = NIC frei.
     used = {dev: [int(i["network_id"]) for i in
                   eve.call("GET", eve.lab(f"/nodes/{nid}/interfaces"))["data"]["ethernet"]]
             for dev, nid in node_ids.items()}
     for dev in NODES:
-        if not used[dev][0]:
-            eve.call("PUT", eve.lab(f"/nodes/{node_ids[dev]}/interfaces"), {"0": cloud})
+        # ether1 an die Wolke der Gruppe; Umhängen zwischen Wolken ist rein optisch
+        # (alle auf pnet0), laufende Nodes bleiben verbunden.
+        target = clouds[cloud_of(dev)]
+        if used[dev][0] != target and (not used[dev][0] or used[dev][0] in clouds.values()):
+            eve.call("PUT", eve.lab(f"/nodes/{node_ids[dev]}/interfaces"), {"0": target})
 
     hot = []  # (node_id, iface, net) laufender Nodes — siehe attach_hot_links
     for (a_dev, a_port), (b_dev, b_port) in LINKS:
@@ -222,7 +293,7 @@ def create_lab(eve: Eve, maps, recreate: bool) -> tuple[dict[str, int], list]:
                 hot.append((node_ids[dev], iface, net))
         eve.call("PUT", eve.lab(f"/networks/{net}"), {"visibility": 0})
         print(f"  Link {a_dev}:{a_port} -- {b_dev}:{b_port}")
-    return node_ids, hot
+    return node_ids, hot, clouds, not exists
 
 
 def attach_hot_links(hot):
@@ -387,6 +458,7 @@ def main(argv=None) -> int:
     ap.add_argument("--recreate", action="store_true", help="Lab vorher löschen")
     ap.add_argument("--skip-import", action="store_true", help="nur Topologie + Bootstrap")
     ap.add_argument("--reimport", nargs="+", metavar="NODE", help="Testanlagen-Nodes neu konfigurieren")
+    ap.add_argument("--relayout", action="store_true", help="Positionen, Wolken und Rahmen neu setzen")
     args = ap.parse_args(argv)
 
     if args.reimport:
@@ -395,7 +467,10 @@ def main(argv=None) -> int:
         return 0
     maps = port_maps()
     eve = Eve()
-    node_ids, hot = create_lab(eve, maps, args.recreate)
+    node_ids, hot, clouds, new = create_lab(eve, maps, args.recreate)
+    if new or args.relayout:
+        print("Layout")
+        apply_layout(eve, node_ids, clouds)
     print("Starte Nodes")
     start_nodes(eve, node_ids)
     attach_hot_links(hot)
