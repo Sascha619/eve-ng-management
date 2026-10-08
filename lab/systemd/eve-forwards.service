@@ -1,0 +1,16 @@
+# systemd-User-Unit für die Lab-Port-Forwards.
+# Installation (einmalig, siehe README):
+#   ln -s ~/Repos/eve-ng-management/lab/systemd/eve-forwards.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now eve-forwards
+#   loginctl enable-linger "$USER"     # startet auch ohne Login
+[Unit]
+Description=EVE-NG Lab Port-Forwards (localhost:1872x/2222/8080 -> 10.0.2.0/24)
+After=network-online.target
+
+[Service]
+ExecStart=%h/Repos/eve-ng-management/lab/eve-forwards.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

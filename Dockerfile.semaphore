@@ -1,5 +1,11 @@
-FROM semaphoreui/semaphore:v2.12.4
+FROM semaphoreui/semaphore:v2.19.16
 
 USER root
-RUN pip3 install --no-cache-dir pytz pynetbox paramiko
-USER semaphore
+# Python-Abhängigkeiten von ansible-tam (ansible/requirements.txt) ins
+# Ansible-venv des Images — Semaphore installiert pip-Requirements nicht selbst.
+# safe.directory: ansible-tam ist vom Host gemountet (fremde UID), Semaphore
+# klont es per file://.
+RUN "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
+      "librouteros>=3.2.1" "netaddr>=1.0.0" "pynetbox>=7.4" pytz \
+ && git config --system --add safe.directory '*'
+USER 1001

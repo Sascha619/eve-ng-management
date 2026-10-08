@@ -1,0 +1,5 @@
+# Generiert aus ansible-tam/docs/export (Kundendaten) — via lab/gen_lab_config.py neu erzeugen
+lab/configs/
+
+__pycache__/
+*.py[cod]

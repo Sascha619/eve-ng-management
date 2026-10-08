@@ -1,0 +1,12 @@
+FROM netboxcommunity/netbox:v4.5.10
+
+# netbox-routing: StaticRoute-Modell, aus dem ansible-tam
+# (roles/routeros_static_routes, netbox_fetch) die statischen Routen liest.
+# 0.4.3 ist die dort verifizierte Version.
+RUN /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python "netbox-routing==0.4.3"
+
+COPY netbox/plugins.py /etc/netbox/config/plugins.py
+
+# Statische Dateien des Plugins ins Image (wie im netbox-docker-Wiki).
+RUN SECRET_KEY="build-only-dummy-key-0123456789abcdefghijklmnopqrstuvwxyz" \
+    /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py collectstatic --no-input

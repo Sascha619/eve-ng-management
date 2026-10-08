@@ -1,0 +1,20 @@
+<!--
+  Mgmt-Netz der EVE-NG-VM (pnet0 / Cloud0). Bildet das frühere VirtualBox-NAT-
+  Netz 10.0.2.0/24 nach, damit die Lab-Geräte ihre Mgmt-IPs aus
+  ansible-tam/ansible/inventory/hosts_lab.yml behalten:
+    10.0.2.1        Host (libvirt)
+    10.0.2.15       EVE-NG-VM (DHCP-Reservierung)
+    10.0.2.101-104  rtr-ilbs-01/02, sw-ilbs-01/02 (statisch, Bootstrap)
+    10.0.2.105      it-fw (statisch)
+-->
+<network>
+  <name>eve-mgmt</name>
+  <forward mode='nat'/>
+  <bridge name='virbr-eve' stp='off' delay='0'/>
+  <ip address='10.0.2.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='10.0.2.200' end='10.0.2.250'/>
+      <host mac='52:54:00:e0:00:15' name='eve-ng' ip='10.0.2.15'/>
+    </dhcp>
+  </ip>
+</network>

@@ -1,48 +1,53 @@
+# Lab-Stack für ansible-tam: NetBox (Source of Truth) + Semaphore (Ansible-UI).
+# Projektname bleibt eve-ng-management — ansible-tam/backups/netbox-*.sh
+# sprechen die Container über diesen Namen an.
+name: eve-ng-management
+
+x-netbox: &netbox
+  # 4.5 wie der NetBox-Dump in ansible-tam/backups und das GraphQL-Schema der
+  # Playbooks (roles/netbox_fetch/README.md); plus Plugin netbox-routing.
+  build:
+    context: .
+    dockerfile: Dockerfile.netbox
+  image: eve-ng-netbox:v4.5.10
+  env_file: netbox.env
+  volumes:
+    - netbox-media:/opt/netbox/netbox/media
+    - netbox-reports:/opt/netbox/netbox/reports
+    - netbox-scripts:/opt/netbox/netbox/scripts
+  restart: unless-stopped
+
 services:
   # ============================================================
   # NetBox - Network Source of Truth
   # ============================================================
   netbox:
-    image: netboxcommunity/netbox:v4.2
+    <<: *netbox
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    env_file: netbox.env
-    volumes:
-      - netbox-media:/opt/netbox/netbox/media
-      - netbox-reports:/opt/netbox/netbox/reports
-      - netbox-scripts:/opt/netbox/netbox/scripts
+      redis-cache:
+        condition: service_healthy
     ports:
-      - "8000:8080"
-    restart: unless-stopped
+      - "127.0.0.1:8001:8080"
+    # healthy erst nach den Migrationen — der Worker crasht sonst auf
+    # fehlenden Tabellen (core_job), solange NetBox noch migriert.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/login/ || exit 1"]
+      start_period: 300s
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
+  # Housekeeping läuft seit NetBox 4.2 als System-Job im Worker.
   netbox-worker:
-    image: netboxcommunity/netbox:v4.2
+    <<: *netbox
     depends_on:
       netbox:
-        condition: service_started
-    env_file: netbox.env
+        condition: service_healthy
     command: /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py rqworker
-    volumes:
-      - netbox-media:/opt/netbox/netbox/media
-      - netbox-reports:/opt/netbox/netbox/reports
-      - netbox-scripts:/opt/netbox/netbox/scripts
-    restart: unless-stopped
-
-  netbox-housekeeping:
-    image: netboxcommunity/netbox:v4.2
-    depends_on:
-      netbox:
-        condition: service_started
-    env_file: netbox.env
-    command: /opt/netbox/housekeeping.sh
-    volumes:
-      - netbox-media:/opt/netbox/netbox/media
-      - netbox-reports:/opt/netbox/netbox/reports
-      - netbox-scripts:/opt/netbox/netbox/scripts
-    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
@@ -104,11 +109,17 @@ services:
       SEMAPHORE_ADMIN_NAME: Admin
       SEMAPHORE_ADMIN_EMAIL: admin@localhost
       SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION}
+    # Lab-Geräte und EVE über die Port-Forwards auf dem Host
+    # (lab/eve-forwards.sh, gebunden an die Docker-Bridge).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - semaphore-data:/var/lib/semaphore
       - ./ansible:/opt/semaphore/playbooks
+      # ansible-tam als lokales Git-Repo (Semaphore klont per file://).
+      - ../ansible-tam:/opt/repos/ansible-tam:ro
     ports:
-      - "3010:3000"
+      - "127.0.0.1:3010:3000"
     restart: unless-stopped
 
   semaphore-db:
@@ -125,6 +136,14 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+# Festes Subnetz: Docker würde sonst 172.18.0.0/16 vergeben und mit den
+# 172.18.x-Netzen des Kunden kollidieren.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.250.0.0/24
 
 volumes:
   netbox-media:
