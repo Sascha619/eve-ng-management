@@ -4,12 +4,13 @@
 name: eve-ng-management
 
 x-netbox: &netbox
-  # 4.5 wie der NetBox-Dump in ansible-tam/backups und das GraphQL-Schema der
-  # Playbooks (roles/netbox_fetch/README.md); plus Plugin netbox-routing.
+  # 4.6.5 wie die Kunden-NetBox (Export per ansible-tam/ansible/scripts/
+  # dump_netbox_ilbs.py); GraphQL-Schema der Playbooks siehe
+  # roles/netbox_fetch/README.md; plus Plugin netbox-routing.
   build:
     context: .
     dockerfile: Dockerfile.netbox
-  image: eve-ng-netbox:v4.5.10
+  image: eve-ng-netbox:v4.6.5
   env_file: netbox.env
   volumes:
     - netbox-media:/opt/netbox/netbox/media

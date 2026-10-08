@@ -15,7 +15,7 @@ erwarten genau die Adressen und Namen unten.
 Host (Ubuntu, KVM/libvirt + Docker)
 │
 ├─ Docker (Compose-Projekt eve-ng-management, Netz 10.250.0.0/24)
-│   ├─ NetBox 4.5 + netbox-routing  http://localhost:8001   admin / admin
+│   ├─ NetBox 4.6 + netbox-routing  http://localhost:8001   admin / admin
 │   └─ Semaphore 2.19    http://localhost:3010   admin / admin
 │
 ├─ eve-forwards (systemd-User-Unit, socat)
@@ -120,19 +120,37 @@ gilt: Configs mit `--bond-mode balance-xor` erzeugen, Lab mit `--recreate` neu.
 
 ```bash
 docker compose up -d --build
-# NetBox-Dump einspielen (Skripte aus ansible-tam):
-mkdir -p ../ansible-tam/backups/netbox-snapshots
-gunzip -c ../ansible-tam/backups/netbox_pre-main-to-null_2026-06-09T121502Z.sql.gz \
-  > ../ansible-tam/backups/netbox-snapshots/20260609_121502.sql
-../ansible-tam/backups/netbox-restore.sh 20260609_121502.sql   # migriert beim Start
-
 lab/setup_semaphore.py      # Projekt KLEIN-115, Repo, Inventory, Env, Templates
 ```
 
-NetBox läuft als eigenes Image (`Dockerfile.netbox`) mit dem Plugin
-**netbox-routing 0.4.3** — Quelle der statischen Routen für
-`routeros_static_routes`. Der Dump vom 09.06. ist älter als das Plugin, die
-Routen müssen neu nach NetBox (`ansible-tam/ansible/scripts/routeros_static_routes_to_netbox.py`).
+NetBox läuft als eigenes Image (`Dockerfile.netbox`) in derselben Version wie
+die Kunden-NetBox (4.6.5) mit dem Plugin **netbox-routing 0.4.3** — Quelle der
+statischen Routen für `routeros_static_routes`.
+
+**Daten** kommen aus der Kunden-NetBox, nicht als DB-Dump, sondern als
+eingegrenzter API-Export (nur die ilbs-Geräte und was daran hängt):
+
+1. `ansible-tam/ansible/scripts/dump_netbox_ilbs.py` auf dem Kunden-Rechner
+   ausführen (nur lesend, nur Standardbibliothek, Python ≥ 3.8):
+   `python3 dump_netbox_ilbs.py --url https://<kunden-netbox>` → eine Datei
+   `netbox_ilbs_<zeitstempel>.json.gz`.
+2. Datei nach `ansible-tam/backups/netbox-snapshots/` legen (gitignored —
+   Kundendaten gehören nicht ins Git).
+3. Ins Lab einspielen (schreibt nur auf localhost, `--purge` leert vorher alle
+   importierten Objekttypen; Benutzer/Tokens bleiben):
+
+   ```bash
+   cd ../ansible-tam
+   backups/netbox-snapshot.sh                                   # Rückweg
+   python3 ansible/scripts/netbox_ilbs_import.py \
+     backups/netbox-snapshots/netbox_ilbs_<zeitstempel>.json.gz --purge --dry-run
+   python3 ansible/scripts/netbox_ilbs_import.py \
+     backups/netbox-snapshots/netbox_ilbs_<zeitstempel>.json.gz --purge
+   ```
+
+IPs von VMs/Fremdgeräten (z.B. NAT-Backends) landen dabei ohne Zuordnung —
+für die Reconciler ohne Belang. Ein vorhandener Snapshot lässt sich alternativ
+mit `backups/netbox-restore.sh <datei>.sql` zurückspielen.
 
 Semaphore klont `ansible-tam` per `file:///opt/repos/ansible-tam` (Bind-Mount
 von `../ansible-tam`), Branch per `setup_semaphore.py --branch` — committete

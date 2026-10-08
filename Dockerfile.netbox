@@ -1,4 +1,4 @@
-FROM netboxcommunity/netbox:v4.5.10
+FROM netboxcommunity/netbox:v4.6.5
 
 # netbox-routing: StaticRoute-Modell, aus dem ansible-tam
 # (roles/routeros_static_routes, netbox_fetch) die statischen Routen liest.
