@@ -1,0 +1,71 @@
+# Vorlage für ext-lab.local.toml (gitignored): Testanlagen hinter den
+# ILBS-Routern, verarbeitet von gen_ext_config.py. Alle Werte hier sind
+# Platzhalter — die echten Namen/Adressen stehen nur in der lokalen Datei.
+
+export_dir = "../../ansible-tam/docs/export"     # relativ zu lab/
+nat_tags = ["ilbs-pve-nat", "ilbs-pve-nat-test"] # nat_inside dieser VIPs = Zielhosts
+ram = "256"                                      # MB je Testanlagen-CHR
+
+# Backbone der Testanlagen (Aruba-Export). Geroutete VLANs mit genau einem
+# untagged Port werden zu Links auf den Node aus dem VLAN-Namen (oder laut
+# vlan_nodes); VLANs mit IP auf dem Trunk zu VLAN-Interfaces.
+[backbone]
+node = "bb-x"
+export = "bb-x.txt"
+mgmt = "10.0.2.106"                       # Lab-Mgmt auf Cloud0
+pos = [300, 850]                          # Position im EVE-Canvas
+uplink = "sw-ilbs-01:sfp-sfpplus24"       # Switch:Kunden-Portname (configs/<switch>.ports.json)
+vrf = "vrf-x"                             # Router-VRF, in dem die Ziele dahinter liegen
+vlan_nodes = { "site-c---tnr1" = "site-c--tnr", "site-c---tnr2" = "site-c--tnr" }
+
+# Optional: Probe-VRF auf dem Backbone in einem L2-VLAN (z.B. Anwahl-Capture).
+[backbone.printer_probe]
+vlan = 128
+address = "198.51.100.6/29"
+onlink = ["198.51.100.70"]                # Ziele außerhalb des Probe-Netzes, on-link
+
+# Standort mit TNR-Paar (Cisco-Exports) und Site-LAN (Switch + Zielhosts).
+[[sites]]
+name = "site-a"
+lan = { node = "site-a-lan", mgmt = "10.0.2.109", pos = [175, 1250] }
+probe = { vlan = 253, address = "198.51.100.60" }   # Client im Standort-LAN
+tnrs = [
+  { node = "site-a--tnr1", export = "site-a--tnr1.txt", mgmt = "10.0.2.107", pos = [100, 1050] },
+  { node = "site-a--tnr2", export = "site-a--tnr2.txt", mgmt = "10.0.2.108", pos = [250, 1050] },
+]
+
+# Gegenstelle ohne Export, über Backbone-VLANs (vlan_nodes) angebunden.
+[[stubs]]
+node = "site-c--tnr"
+mgmt = "10.0.2.113"
+pos = [700, 1050]
+vrf = "vrf-x"
+hosts_in = ["203.0.113.0/24"]             # Zielhosts in diesen Netzen -> /32 auf dem Stub
+
+# Gegenstelle direkt an einem ILBS-Switch-Port; dient auch als Client im VRF.
+[[stubs]]
+node = "nexthop-y"
+mgmt = "10.0.2.114"
+pos = [100, 650]
+vrf = "vrf-y"
+attach = "sw-ilbs-01:sfp-sfpplus21"
+address = "192.0.2.246/30"
+gateway = "192.0.2.245"
+hosts_in = ["192.0.2.0/25"]
+
+# VM-Ersatz am PVE-Bond: Mgmt untagged, VMs als VRFs auf VLANs.
+[pve]
+node = "pve"
+mgmt = "10.0.2.115"
+pos = [100, 400]
+attach = "sw-ilbs-01:pve-ilbs-cn-01-public-mlag-eno1np0"
+address = "192.0.2.230/27"
+gateway = "192.0.2.225"
+vms = [
+  { name = "vm-a", vlan = 1254, address = "198.51.100.40/26", gateway = "198.51.100.1" },
+]
+
+[tests]
+main_client = { node = "it-fw", ip = "10.0.2.105", src = "172.18.104.1" }
+known_hosts = ["192.0.2.63"]              # Ziele, die es außerhalb der Testanlagen gibt
+expect_unreachable = ["203.0.113.204"]    # Ziele ohne Netz — auch real unerreichbar

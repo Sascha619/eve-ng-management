@@ -29,13 +29,15 @@ Host (Ubuntu, KVM/libvirt + Docker)
              rtr-ilbs-01 10.0.2.101   rtr-ilbs-02 10.0.2.102
              sw-ilbs-01  10.0.2.103   sw-ilbs-02  10.0.2.104
              it-fw       10.0.2.105   (simuliert IT-Firewall, VLAN 1240)
+             moa-pc      VPC, 172.18.104.10/23 (Entwicklerrechner im Clientnetz)
+             Testanlagen 10.0.2.106-.120 (optional, siehe „Testanlagen und NAT-Tests“)
 ```
 
 Topologie im Lab:
 
 ```
 rtr-ilbs-01 ══ sw-ilbs-01 ══ LACP-PEER-LINK ══ sw-ilbs-02 ══ rtr-ilbs-02
-                   └── it-fw
+                   └── it-fw ── moa-pc
 ```
 
 RouterOS-Login auf allen Nodes: `admin` / `Mikrotik1!`
@@ -50,7 +52,9 @@ Die Lab-Geräte tragen den **Kundenstand** aus `ansible-tam/docs/export/*.txt`.
   (`ether2..N` per `name=` umbenannt). `ether1` = `oob-ilbs` = Mgmt.
 - Entfernt: MLAG (CHR kann kein MLAG, Peer-Link = normaler Bond),
   Port-/Bond-MTU, `/interface ethernet switch`, `/system routerboard`,
-  `/tool sniffer`, die Kunden-Adresse auf `oob-ilbs`.
+  `/tool sniffer`.
+- `oob-ilbs` trägt neben der Lab-Mgmt-IP (10.0.2.x) die Kunden-OoB-Adresse
+  (172.18.118.221–224), damit der moa-pc die Geräte wie beim Kunden erreicht.
 - Alles andere — VLANs, VRRP, VRFs, IPs, Bridge-VLANs, Interface-Listen,
   Mangle/NAT, Routen — bleibt textgleich.
 
@@ -112,6 +116,10 @@ lab/gen_lab_config.py       # Exports -> lab/configs/
 lab/create_ilbs_lab.py      # Topologie, Start, Bootstrap, Config-Import
 ```
 
+Das Skript ergänzt ein bestehendes Lab um fehlende Nodes und Links (neue
+Einträge in `NODES`/`VPCS`/`LINKS`, Skript erneut starten); bestehende Nodes
+behalten ihre Config.
+
 LACP läuft über die EVE-Bridges (verifiziert: Partner-ID am Router-Bond, VRRP
 rtr-01 Master / rtr-02 Backup). Falls das nach einem EVE-Update nicht mehr
 gilt: Configs mit `--bond-mode balance-xor` erzeugen, Lab mit `--recreate` neu.
@@ -169,6 +177,85 @@ python3 -m venv .venv
 source ~/Repos/eve-ng-management/lab/ansible-tam.env   # Interpreter, ROUTEROS_USER, NetBox
 cd ansible && ansible-playbook -i inventory/hosts_lab.yml playbooks/pve_nat.yml
 ```
+
+## Verkehr simulieren (moa-pc)
+
+`moa-pc` steht für den Entwicklerrechner beim Kunden: ein EVE-VPC (nur `ping`
+und `trace`) im Clientnetz IT hinter der it-fw. Die it-fw bildet beide
+Kunden-Firewalls zugleich nach — Gateway Clientnetz (172.18.104.1) und
+Projekte-Firewall mit Bein im OoB-Netz (172.18.118.1 auf `ether1`):
+
+| Ziel | Weg |
+|---|---|
+| Geräte-OoB 172.18.118.221–224 | it-fw direkt (wie beim Kunden) |
+| InBand-Mgmt 172.18.255.0/28, VLAN-Netze, PVE-Mgmt | it-fw → VRRP 172.20.240.6 (VLAN 1240) |
+| Testanlagen über NAT-VIPs (172.18.251.x, 172.18.252.192/26) | it-fw → VRRP 172.20.240.6, dort pve_nat (siehe unten) |
+
+Konsole: EVE-Web-UI → `ilbs.unl` → Klick auf `moa-pc`, z.B.
+`ping 172.18.118.224`, `trace 172.18.255.1`. Die IP kommt aus der
+Startup-Config des Nodes (`VPCS` in `create_ilbs_lab.py`).
+
+Der Rückweg folgt den Routing-Tabellen der Geräte, die it-fw macht kein NAT.
+Er hängt an der Default-Route von rtr-ilbs-01 (VRRP-Master; auch die Switches
+antworten über 172.18.255.14). Die fehlt im Export vom 2026-10-05, ist beim
+Kunden aber vorhanden (geprüft 2026-10-08) und im Lab nachgetragen. Nach einem
+Neuaufbau aus diesem Export auf rtr-ilbs-01 wieder anlegen — oder neu
+exportieren:
+
+```
+/ip route add distance=1 dst-address=0.0.0.0/0 gateway=172.20.240.1 routing-table=main
+```
+
+## Testanlagen und NAT-Tests
+
+Hinter den ILBS-Routern lassen sich die Testanlagen nachbauen, damit die
+`pve_nat`-Regeln und die VRFs Ende-zu-Ende testbar sind: Backbone (Aruba),
+TNR-Paare je Standort (Cisco, VRRP), Stubs für Gegenstellen ohne Export und
+ein PVE-Ersatz mit VMs in den Testanlagen-VRFs — alles als kleine CHRs
+(256 MB, Mgmt 10.0.2.106–.120).
+
+Namen, Adressen und Anschlusspunkte stehen in `lab/ext-lab.local.toml`
+(gitignored, Kundendaten; Format: `lab/ext-lab.example.toml`). Daraus und aus
+den Exports in `ansible-tam/docs/export` erzeugt `lab/gen_ext_config.py` die
+Configs und `configs/ext_topology.json`:
+
+- **Backbone und TNRs** übernehmen nur die L3-Sicht der Exports (VLANs, IPs,
+  VRRP, statische Routen). Ein Site-Switch ersetzt Crosslink und Access-Ports.
+  Routen mit Backup-Route bekommen `check-gateway=ping` — in EVE bleibt der
+  Link eines gestoppten Nodes oben.
+- **Zielhosts** sind die `nat_inside`-Adressen der pve_nat-VIPs aus der
+  Lab-NetBox, platziert im passenden Standort-VLAN (je VLAN ein VRF mit
+  Default-Route über die VRRP-Adresse) bzw. als /32 auf einem Stub.
+  Ziele ohne passendes Netz meldet der Generator.
+- **Clients** sind Probe-VRFs auf den CHRs (per API automatisierbar,
+  überstehen einen TNR-Ausfall); der moa-pc bleibt für Handtests.
+
+```bash
+lab/gen_ext_config.py
+lab/create_ilbs_lab.py          # ergänzt Nodes/Links, Bootstrap, Import
+~/Repos/ansible-tam/.venv/bin/python lab/test_nat_paths.py
+```
+
+EVE CE verbindet laufende Nodes nicht mit neuen Links; `create_ilbs_lab.py`
+hängt deren TAP-Interfaces direkt an die Link-Bridge (nach einem Neustart
+übernimmt EVE das selbst).
+
+`test_nat_paths.py` pingt jedes NAT-Paar vom passenden Client (VIP in main:
+von der it-fw mit 172.18.104.1, wie der moa-pc) und prüft auf beiden Routern
+den Zähler der managed dstnat-Regel und per conntrack das tatsächliche
+Backend. Danach VRF-Szenarien von den VMs und dem Stub im Testanlagen-VRF: eigenes Gateway
+(muss antworten), ein main-VIP und ein main-Host (dürfen nicht antworten; ein
+steigender dstnat-Zähler zeigt, dass der Hinweg trotzdem ins Ziel-VRF leakt).
+
+**Test-Paare** (Namespace `ilbs-pve-nat-test`):
+
+1. In der Lab-NetBox VIP mit Tag `ilbs-pve-nat-test` und `nat_inside` anlegen
+   (den Tag legt `test_nat_paths.py --tag ilbs-pve-nat-test` bei Bedarf an).
+2. `lab/gen_ext_config.py` und `lab/create_ilbs_lab.py --reimport <site-lan>`
+   (setzt den Node zurück und spielt die neue Config ein).
+3. `pve_nat.yml -e pve_nat_is_test=true -e pve_nat_tag=ilbs-pve-nat-test -e pve_nat_dry_run=false`
+4. `lab/test_nat_paths.py --tag ilbs-pve-nat-test`
+5. Aufräumen: Tag entfernen, Lauf mit `-e pve_nat_prune=true`.
 
 ## Starten / Stoppen
 

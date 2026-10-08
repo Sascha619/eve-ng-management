@@ -20,7 +20,9 @@ Angepasst wird nur, was es auf einem CHR nicht gibt:
 - MLAG (mlag-id, mlag-peer-port, mlag-priority) entfällt; der Peer-Link bleibt
   ein normaler Bond.
 - /interface ethernet switch, /system routerboard settings, /tool sniffer
-  entfallen; die oob-ilbs-Adresse setzt der Bootstrap (Lab-Mgmt-IP).
+  entfallen.
+- oob-ilbs behält die Kunden-Adresse (172.18.118.0/24, im Lab über die it-fw
+  erreichbar); die Lab-Mgmt-IP (10.0.2.x) ergänzt der Bootstrap.
 - Nach /ip vrf folgt ein :delay — die VRF-Routing-Tabellen entstehen
   asynchron, der Import liefe sonst in "input does not match any value of
   new-routing-mark".
@@ -53,6 +55,8 @@ KEEP_ETHERNET_PARAMS = ("name", "comment", "disabled")
 
 # Physische Ports von CCR2004 / CRS326 in Frontpanel-Reihenfolge.
 PORT_RE = re.compile(r"^(ether|sfp-sfpplus|sfp28-|qsfpplus)(\d+)(?:-(\d+))?$")
+
+ROUTEROS_HEADER = re.compile(r"# .* by RouterOS ")
 
 PARAM_RE = re.compile(r'([\w-]+)=("(?:[^"\\]|\\.)*"|\S*)')
 
@@ -168,8 +172,6 @@ def convert(text: str, bond_mode: str | None) -> tuple[str, dict[str, str]]:
                 line = drop_params(line, ("mlag-peer-port", "mlag-priority"))
             elif header == "/interface ovpn-server server":
                 line = drop_params(line, ("mac-address",))
-            elif header == "/ip address" and params(line).get("interface") == MGMT_NAME:
-                continue
             elif header == "/ip route":
                 line = drop_params(line, ("suppress-hw-offload",))  # nur CRS-Hardware
             new_body.append(line)
@@ -189,9 +191,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bond-mode", help="Bond-Modus im Lab überschreiben (z.B. balance-xor)")
     args = ap.parse_args(argv)
 
-    exports = sorted(args.export_dir.glob("*.txt"))
+    # Nur RouterOS-Exports; Aruba/Cisco der Testanlagen verarbeitet gen_ext_config.py.
+    exports = sorted(f for f in args.export_dir.glob("*.txt")
+                     if ROUTEROS_HEADER.match(f.read_text(errors="replace")))
     if not exports:
-        sys.exit(f"Keine Exports (*.txt) in {args.export_dir}")
+        sys.exit(f"Keine RouterOS-Exports (*.txt) in {args.export_dir}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for export in exports:

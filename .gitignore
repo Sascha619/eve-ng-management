@@ -3,3 +3,6 @@ lab/configs/
 
 __pycache__/
 *.py[cod]
+
+# Lokale Lab-Spec der Testanlagen (Kundendaten) — Vorlage: lab/ext-lab.example.toml
+lab/*.local.toml
