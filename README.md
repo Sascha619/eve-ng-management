@@ -228,6 +228,8 @@ Configs und `configs/ext_topology.json`:
 - **Zielhosts** sind die `nat_inside`-Adressen der pve_nat-VIPs aus der
   Lab-NetBox, platziert im passenden Standort-VLAN (je VLAN ein VRF mit
   Default-Route über die VRRP-Adresse) bzw. als /32 auf einem Stub.
+  Einzelne Zielhosts lassen sich per `vpcs` je Site stattdessen als VPC an
+  einem Access-Port des Site-Switches aufbauen (zum Anklicken in EVE).
   Ziele ohne passendes Netz meldet der Generator.
 - **Drucker-LANs** (`printer` je Site, `printer_vlan` am Backbone): Das
   L2-VLAN ohne IP reicht der Backbone getaggt bis zum Router durch; jedes

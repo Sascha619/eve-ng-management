@@ -29,6 +29,9 @@ probe = { vlan = 253, address = "198.51.100.60" }   # Client im Standort-LAN
 # Optional: Drucker-LAN (SVI-VLAN) am printer_vlan des Backbones; client = Host,
 # der druckt (im Site-LAN platziert, falls er nicht schon Zielhost ist).
 printer = { vlan = 10, client = "198.51.100.10" }
+# Optional: Zielhosts als VPC (Access-Port im passenden SVI-VLAN, Gateway = VRRP)
+# statt als VRF-Adresse auf dem Site-LAN — zum Anklicken in EVE.
+vpcs = [{ name = "site-a--pr1", address = "198.51.100.196", pos = [330, 1250] }]
 tnrs = [
   { node = "site-a--tnr1", export = "site-a--tnr1.txt", mgmt = "10.0.2.107", pos = [100, 1050] },
   { node = "site-a--tnr2", export = "site-a--tnr2.txt", mgmt = "10.0.2.108", pos = [250, 1050] },

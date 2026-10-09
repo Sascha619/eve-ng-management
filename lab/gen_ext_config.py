@@ -25,7 +25,8 @@ Nachbau (nur L3, was für Routing und NAT zählt):
 - Site-LAN: ein Switch für beide TNRs (ersetzt Crosslink und Access-Ports,
   VLAN 511 läuft hier durch) mit den Zielhosts: je VLAN ein VRF mit den
   Host-Adressen und Default-Route über die VRRP-Adresse. Mit "printer":
-  Access-Port im Drucker-LAN zum Backbone, druckender Host als Probe.
+  Access-Port im Drucker-LAN zum Backbone, druckender Host als Probe. Mit
+  "vpcs": diese Zielhosts als VPC an einem Access-Port statt als VRF-Adresse.
 - Stubs (Gegenstellen ohne Export): Uplink-Adressen + Default-Route zurück,
   Zielhosts als /32 auf einer Loopback-Bridge.
 - PVE: Bond zum PVE-Port des Switches, Mgmt untagged; mit VMs eine VLAN-Bridge
@@ -256,6 +257,7 @@ def main(argv=None) -> int:
     CONFIG_DIR.mkdir(exist_ok=True)
 
     nodes, links, probes = {}, [], {}
+    vpcs: dict[str, dict] = {}        # VPC-Nodes (Site-LAN-Zielhosts, PVE-VMs)
     devices: dict[str, str] = {}      # Adressen der Lab-Geräte selbst -> Node
     hosts: dict[str, str] = {}        # platzierte Zielhosts -> Node
     stub_hosts: dict[str, list] = {}  # Stub-Node -> Adressen
@@ -375,24 +377,51 @@ def main(argv=None) -> int:
         rsc = Rsc(lan["node"], lan["mgmt"], ", ".join(t["export"] for t, _ in tnrs))
         for t, _ in tnrs:
             rsc.port(t["node"])
+
+        def svi_of(addr: str) -> int | None:
+            return next((v for v, i in svis_all.items() if ipaddress.IPv4Address(addr) in i["ip"].network), None)
+
+        def gw_of(vid: int) -> str:
+            i = svis_all[vid]
+            return next((v["ip"] for v in i["vrrp"].values() if "ip" in v), str(i["ip"].ip))
+
+        # Access-Ports (untagged) nach den TNR-Ports: Drucker-LAN zum Backbone, VPCs
+        access: list[tuple[str, int]] = []
         pr = site.get("printer")
         if pr and pr["vlan"] not in svis_all:
             sys.exit(f"{site['name']}: printer.vlan {pr['vlan']} ist kein SVI der TNRs")
         if pr:
-            # Access-Port im Drucker-LAN zum Backbone-VLAN printer_vlan
-            rsc.port(bb_spec["node"], f"Drucker-LAN zu {bb_spec['node']} {site['name']}-printer ({bb_spec['node']}-VLAN {pvlan})")
+            access.append((rsc.port(bb_spec["node"], f"Drucker-LAN zu {bb_spec['node']} {site['name']}-printer"
+                                                     f" ({bb_spec['node']}-VLAN {pvlan})"), pr["vlan"]))
+        site_vpcs: dict[str, str] = {}  # Zielhost als VPC statt als VRF-Adresse: Adresse -> VPC
+        for v in site.get("vpcs", []):
+            vid = svi_of(v["address"])
+            if vid is None:
+                sys.exit(f"{site['name']}: VPC {v['name']} {v['address']} liegt in keinem SVI-Netz")
+            access.append((rsc.port(v["name"], f"VPC {v['name']} (VLAN {vid})"), vid))
+            vpcs[v["name"]] = {"pos": v["pos"], "config": f"set pcname {v['name']}\n"
+                               f"ip {v['address']}/{svis_all[vid]['ip'].network.prefixlen} {gw_of(vid)}\n"}
+            links.append([[lan["node"], v["name"]], [v["name"], "eth0"]])
+            site_vpcs[v["address"]] = v["name"]
         rsc.add("/interface bridge", 'add name=site protocol-mode=none vlan-filtering=yes comment="Lab: Site-Switch"')
         rsc.add("/interface bridge port", *[f"add bridge=site interface={t['node']} frame-types=admit-only-vlan-tagged"
                                             for t, _ in tnrs],
-                *([f"add bridge=site interface={bb_spec['node']} pvid={pr['vlan']}"
-                   " frame-types=admit-only-untagged-and-priority-tagged"] if pr else []))
+                *[f"add bridge=site interface={p} pvid={vid} frame-types=admit-only-untagged-and-priority-tagged"
+                  for p, vid in access])
         tagged = f"site,{','.join(t['node'] for t, _ in tnrs)}"
-        vids = ",".join(str(v) for v in sorted(svis_all) if not pr or v != pr["vlan"])
+        untagged: dict[int, list[str]] = {}
+        for p, vid in access:
+            untagged.setdefault(vid, []).append(p)
+        vids = ",".join(str(v) for v in sorted(svis_all) if v not in untagged)
         rsc.add("/interface bridge vlan", f"add bridge=site tagged={tagged} vlan-ids={vids}",
-                *([f"add bridge=site tagged={tagged} untagged={bb_spec['node']} vlan-ids={pr['vlan']}"] if pr else []))
+                *[f"add bridge=site tagged={tagged} untagged={','.join(ps)} vlan-ids={vid}"
+                  for vid, ps in sorted(untagged.items())])
         site_hosts: dict[int, list] = {}
         for b, vrf in backends:
             if vrf != bb_spec["vrf"] or b in devices:
+                continue
+            if b in site_vpcs:
+                hosts[b] = site_vpcs[b]
                 continue
             for vid, i in svis_all.items():
                 if ipaddress.IPv4Address(b) in i["ip"].network:
@@ -400,9 +429,11 @@ def main(argv=None) -> int:
                     hosts[b] = lan["node"]
         if pr:
             # Druckender Host: meist schon Zielhost, sonst als Probe-Adresse dazu.
-            cvid = next((v for v, i in svis_all.items() if ipaddress.IPv4Address(pr["client"]) in i["ip"].network), None)
+            cvid = svi_of(pr["client"])
             if cvid is None:
                 sys.exit(f"{site['name']}: printer.client {pr['client']} liegt in keinem SVI-Netz")
+            if pr["client"] in site_vpcs:
+                sys.exit(f"{site['name']}: printer.client {pr['client']} ist ein VPC — das Testskript braucht ein VRF")
             if pr["client"] not in site_hosts.setdefault(cvid, []):
                 site_hosts[cvid].append(pr["client"])
             probes[f"{site['name']}-printer-client"] = {"node": lan["node"], "vrf": f"v{cvid}", "side": bb_spec["vrf"],
@@ -418,7 +449,7 @@ def main(argv=None) -> int:
         vlans, addrs, routes = [], [], []
         for vid, addr_list in sorted(site_hosts.items()):
             i = svis_all[vid]
-            gw = next((v["ip"] for v in i["vrrp"].values() if "ip" in v), str(i["ip"].ip))
+            gw = gw_of(vid)
             vlans.append(f"add interface=site name=vlan{vid} vlan-id={vid} comment={q(i['description'])}")
             for a in addr_list:
                 addrs.append(f"add address={a}/{i['ip'].network.prefixlen} interface=vlan{vid}"
@@ -471,7 +502,7 @@ def main(argv=None) -> int:
         rsc.write()
 
     # ── PVE ──
-    vpcs, pve_mgmt = {}, []
+    pve_mgmt = []
     for pve in spec.get("pve", []):
         add_node(pve["node"], pve, "pve")
         rsc = Rsc(pve["node"], pve["mgmt"], "ext-lab.local.toml")
