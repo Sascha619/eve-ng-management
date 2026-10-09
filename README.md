@@ -229,6 +229,11 @@ Configs und `configs/ext_topology.json`:
   Lab-NetBox, platziert im passenden Standort-VLAN (je VLAN ein VRF mit
   Default-Route über die VRRP-Adresse) bzw. als /32 auf einem Stub.
   Ziele ohne passendes Netz meldet der Generator.
+- **Drucker-LANs** (`printer` je Site, `printer_vlan` am Backbone): Das
+  L2-VLAN ohne IP reicht der Backbone getaggt bis zum Router durch; jedes
+  Drucker-LAN hängt per Access-Port daran (im Lab ein Backbone-Port je Site
+  statt eines untagged Ports mit Verteil-Switch). So fängt der Router per ARP
+  die Anwahl-Adressen nicht vorhandener Drucker (N:1-NAT auf einen Drucker).
 - **Clients** sind Probe-VRFs auf den CHRs (per API automatisierbar,
   überstehen einen TNR-Ausfall), z.B. `/ping <ziel> vrf=<probe>`; für
   Handtests der moa-pc und die VM-VPCs.
@@ -254,7 +259,10 @@ hängt deren TAP-Interfaces direkt an die Link-Bridge (nach einem Neustart
 `test_nat_paths.py` pingt jedes NAT-Paar vom passenden Client (VIP in main:
 von der it-fw mit 172.18.104.1, wie der moa-pc) und prüft auf beiden Routern
 den Zähler der managed dstnat-Regel und per conntrack das tatsächliche
-Backend. Danach VRF-Szenarien von den VMs und dem Stub im Testanlagen-VRF: eigenes Gateway
+Backend. Paare, deren Backend in einem Drucker-LAN liegt, prüft es als
+Matrix: jeder druckende Host (`printer.client`) pingt den Drucker direkt und
+jede Anwahl-Adresse; dazu der VRRP-Stand der TNRs auf den Drucker-LANs (sie
+teilen sich ein L2). Danach VRF-Szenarien von den VMs und dem Stub im Testanlagen-VRF: eigenes Gateway
 (muss antworten), ein main-VIP und ein main-Host (dürfen nicht antworten; ein
 steigender dstnat-Zähler zeigt, dass der Hinweg trotzdem ins Ziel-VRF leakt).
 

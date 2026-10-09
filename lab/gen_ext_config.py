@@ -17,12 +17,15 @@ Nachbau (nur L3, was für Routing und NAT zählt):
   damit der Node nicht am STP der ILBS-Switches teilnimmt. Statische Routen wie
   im Export; Ziele mit Backup-Route (distance) bekommen check-gateway=ping
   (Lab-Abweichung: in EVE bleibt der Link eines gestoppten Nodes oben).
+  Drucker-VLAN (printer_vlan, ohne IP): VLAN-Interface auf dem Trunk + Bridge
+  mit je einem Port zum Drucker-LAN jeder Site (statt untagged-Port + Switch).
 - TNR (Cisco): BDI1 -> Port "uplink", alle SVIs als VLAN-Interfaces auf Port
   "lan" mit VRRP (vrid = Gruppe, Priorität aus dem Export), Loopback0, Routen.
   Weggelassen: MTU, Tracking, QoS, NetFlow, Auth, Access-Ports.
 - Site-LAN: ein Switch für beide TNRs (ersetzt Crosslink und Access-Ports,
   VLAN 511 läuft hier durch) mit den Zielhosts: je VLAN ein VRF mit den
-  Host-Adressen und Default-Route über die VRRP-Adresse.
+  Host-Adressen und Default-Route über die VRRP-Adresse. Mit "printer":
+  Access-Port im Drucker-LAN zum Backbone, druckender Host als Probe.
 - Stubs (Gegenstellen ohne Export): Uplink-Adressen + Default-Route zurück,
   Zielhosts als /32 auf einer Loopback-Bridge.
 - PVE: Bond zum PVE-Port des Switches, Mgmt untagged; mit VMs eine VLAN-Bridge
@@ -256,6 +259,7 @@ def main(argv=None) -> int:
     devices: dict[str, str] = {}      # Adressen der Lab-Geräte selbst -> Node
     hosts: dict[str, str] = {}        # platzierte Zielhosts -> Node
     stub_hosts: dict[str, list] = {}  # Stub-Node -> Adressen
+    printer: dict[str, dict] = {}     # Site -> Drucker-LAN (Netz, VRRP, TNRs)
 
     def add_node(name, cfg, kind):
         nodes[name] = {"ip": cfg["mgmt"], "pos": cfg["pos"], "icon": ICONS[kind], "ram": ram}
@@ -311,24 +315,26 @@ def main(argv=None) -> int:
                 stub_uplinks.setdefault(peer, []).append((port, v["ip"]))
             else:
                 links.append([[bb_spec["node"], port], [peer, "uplink"]])
-    pp = bb_spec.get("printer_probe")
-    if pp:
-        vlan_lines.append(f"add interface={trunk_name} name=vlan{pp['vlan']} vlan-id={pp['vlan']}"
-                          f" comment={q(bb['vlans'].get(pp['vlan'], {}).get('name', '') + ' (Lab-Probe)')}")
+    # Drucker-VLAN: reines L2 vom Trunk zu den Drucker-LANs der Sites. Die Ports
+    # erst nach der VLAN-Schleife anlegen, damit bestehende etherN-Links bleiben.
+    pvlan = bb_spec.get("printer_vlan")
+    printer_sites = [s for s, _ in sites if "printer" in s]
+    if printer_sites and not pvlan:
+        sys.exit("Sites mit printer brauchen backbone.printer_vlan")
+    if pvlan:
+        pv = bb["vlans"].get(pvlan, {"name": "", "untagged": []})
+        vlan_lines.append(f"add interface={trunk_name} name=vlan{pvlan} vlan-id={pvlan} comment={q(pv['name'])}")
     rsc.add("/interface vlan", *vlan_lines)
-    if pp:
-        rsc.vrf("printer", [f"vlan{pp['vlan']}"])
-        addr_lines.append(f"add address={pp['address']} interface=vlan{pp['vlan']}"
-                          ' comment="Lab-Probe Drucker-Client (Annahme)"')
+    if pvlan:
+        on = ",".join(pv["untagged"]) or "?"
+        pports = [rsc.port(f"{s['name']}-printer", f"VLAN {pvlan} untagged {on} -> {s['lan']['node']}")
+                  for s in printer_sites]
+        rsc.add("/interface bridge", f"add name=printer protocol-mode=none"
+                f" comment={q(f'VLAN {pvlan} L2 bis zum Router (Lab: je Drucker-LAN ein Port statt {on})')}")
+        rsc.add("/interface bridge port", *[f"add bridge=printer interface={p}" for p in [f"vlan{pvlan}", *pports]])
+        links += [[[bb_spec["node"], p], [s["lan"]["node"], bb_spec["node"]]] for s, p in zip(printer_sites, pports)]
     rsc.add("/ip address", *addr_lines)
-    route = route_lines(bb["routes"])
-    if pp:
-        route += [f"add dst-address={a}/32 gateway=vlan{pp['vlan']}@printer routing-table=printer"
-                  ' comment="Lab-Probe: Anwahl-Adresse on-link"' for a in pp.get("onlink", [])]
-        probes["printer"] = {"node": bb_spec["node"], "vrf": "printer", "side": bb_spec["vrf"],
-                             "src": pp["address"].split("/")[0], "assumption": True,
-                             "reaches": [str(ipaddress.IPv4Interface(pp["address"]).network), *pp.get("onlink", [])]}
-    rsc.add("/ip route", *route)
+    rsc.add("/ip route", *route_lines(bb["routes"]))
     rsc.write()
 
     # ── Sites: TNRs + LAN ──
@@ -369,12 +375,21 @@ def main(argv=None) -> int:
         rsc = Rsc(lan["node"], lan["mgmt"], ", ".join(t["export"] for t, _ in tnrs))
         for t, _ in tnrs:
             rsc.port(t["node"])
+        pr = site.get("printer")
+        if pr and pr["vlan"] not in svis_all:
+            sys.exit(f"{site['name']}: printer.vlan {pr['vlan']} ist kein SVI der TNRs")
+        if pr:
+            # Access-Port im Drucker-LAN zum Backbone-VLAN printer_vlan
+            rsc.port(bb_spec["node"], f"Drucker-LAN zu {bb_spec['node']} {site['name']}-printer ({bb_spec['node']}-VLAN {pvlan})")
         rsc.add("/interface bridge", 'add name=site protocol-mode=none vlan-filtering=yes comment="Lab: Site-Switch"')
         rsc.add("/interface bridge port", *[f"add bridge=site interface={t['node']} frame-types=admit-only-vlan-tagged"
-                                            for t, _ in tnrs])
-        vids = ",".join(str(v) for v in sorted(svis_all))
-        rsc.add("/interface bridge vlan",
-                f"add bridge=site tagged=site,{','.join(t['node'] for t, _ in tnrs)} vlan-ids={vids}")
+                                            for t, _ in tnrs],
+                *([f"add bridge=site interface={bb_spec['node']} pvid={pr['vlan']}"
+                   " frame-types=admit-only-untagged-and-priority-tagged"] if pr else []))
+        tagged = f"site,{','.join(t['node'] for t, _ in tnrs)}"
+        vids = ",".join(str(v) for v in sorted(svis_all) if not pr or v != pr["vlan"])
+        rsc.add("/interface bridge vlan", f"add bridge=site tagged={tagged} vlan-ids={vids}",
+                *([f"add bridge=site tagged={tagged} untagged={bb_spec['node']} vlan-ids={pr['vlan']}"] if pr else []))
         site_hosts: dict[int, list] = {}
         for b, vrf in backends:
             if vrf != bb_spec["vrf"] or b in devices:
@@ -383,6 +398,18 @@ def main(argv=None) -> int:
                 if ipaddress.IPv4Address(b) in i["ip"].network:
                     site_hosts.setdefault(vid, []).append(b)
                     hosts[b] = lan["node"]
+        if pr:
+            # Druckender Host: meist schon Zielhost, sonst als Probe-Adresse dazu.
+            cvid = next((v for v, i in svis_all.items() if ipaddress.IPv4Address(pr["client"]) in i["ip"].network), None)
+            if cvid is None:
+                sys.exit(f"{site['name']}: printer.client {pr['client']} liegt in keinem SVI-Netz")
+            if pr["client"] not in site_hosts.setdefault(cvid, []):
+                site_hosts[cvid].append(pr["client"])
+            probes[f"{site['name']}-printer-client"] = {"node": lan["node"], "vrf": f"v{cvid}", "side": bb_spec["vrf"],
+                                                        "src": pr["client"], "printer": True}
+            psvi = svis_all[pr["vlan"]]
+            printer[site["name"]] = {"net": str(psvi["ip"].network), "vrrp": sorted(psvi["vrrp"]),
+                                     "tnrs": [t["node"] for t, _ in tnrs]}
         probe = site.get("probe")
         if probe:
             site_hosts.setdefault(probe["vlan"], [])
@@ -394,7 +421,8 @@ def main(argv=None) -> int:
             gw = next((v["ip"] for v in i["vrrp"].values() if "ip" in v), str(i["ip"].ip))
             vlans.append(f"add interface=site name=vlan{vid} vlan-id={vid} comment={q(i['description'])}")
             for a in addr_list:
-                addrs.append(f"add address={a}/{i['ip'].network.prefixlen} interface=vlan{vid} comment={q(labels[a])}")
+                addrs.append(f"add address={a}/{i['ip'].network.prefixlen} interface=vlan{vid}"
+                             f" comment={q(labels.get(a, 'Lab-Probe Drucker-Client'))}")
             if probe and probe["vlan"] == vid:
                 addrs.append(f"add address={probe['address']}/{i['ip'].network.prefixlen} interface=vlan{vid}"
                              ' comment="Lab-Probe Client"')
@@ -495,7 +523,8 @@ def main(argv=None) -> int:
 
     # ── Prüfungen + Topologie ──
     tests = spec.get("tests", {})
-    clash = [p["src"] for p in probes.values() if any(p["src"] == b for b, _ in backends)]
+    # Drucker-Clients dürfen Zielhosts sein: Sie nutzen deren Adresse, legen keine zweite an.
+    clash = [p["src"] for p in probes.values() if not p.get("printer") and any(p["src"] == b for b, _ in backends)]
     if clash:
         sys.exit(f"Probe-Adressen sind NAT-Ziele: {clash} — andere Adressen in der Spec wählen.")
     known = set(tests.get("known_hosts", []))
@@ -506,6 +535,7 @@ def main(argv=None) -> int:
         "known_hosts": sorted(known), "expect_unreachable": tests.get("expect_unreachable", []),
         "main_client": tests.get("main_client"),
         "pve_mgmt": pve_mgmt, "vpcs": vpcs,
+        "printer": {"backbone": bb_spec["node"], "sites": printer} if printer else {},
         "clouds": spec.get("clouds", {}), "frames": spec.get("frames", {}),
     }
     (CONFIG_DIR / "ext_topology.json").write_text(json.dumps(topo, indent=2) + "\n")

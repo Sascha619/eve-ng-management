@@ -17,18 +17,18 @@ pos = [300, 850]                          # Position im EVE-Canvas
 uplink = "sw-ilbs-01:sfp-sfpplus24"       # Switch:Kunden-Portname (configs/<switch>.ports.json)
 vrf = "vrf-x"                             # Router-VRF, in dem die Ziele dahinter liegen
 vlan_nodes = { "site-c---tnr1" = "site-c--tnr", "site-c---tnr2" = "site-c--tnr" }
-
-# Optional: Probe-VRF auf dem Backbone in einem L2-VLAN (z.B. Anwahl-Capture).
-[backbone.printer_probe]
-vlan = 128
-address = "198.51.100.6/29"
-onlink = ["198.51.100.70"]                # Ziele außerhalb des Probe-Netzes, on-link
+# Optional: L2-VLAN ohne IP, das der Backbone getaggt bis zum Router durchreicht
+# (Drucker-Anwahl-Capture). Daran hängen die Drucker-LANs der Sites mit "printer".
+printer_vlan = 128
 
 # Standort mit TNR-Paar (Cisco-Exports) und Site-LAN (Switch + Zielhosts).
 [[sites]]
 name = "site-a"
 lan = { node = "site-a-lan", mgmt = "10.0.2.109", pos = [175, 1250] }
 probe = { vlan = 253, address = "198.51.100.60" }   # Client im Standort-LAN
+# Optional: Drucker-LAN (SVI-VLAN) am printer_vlan des Backbones; client = Host,
+# der druckt (im Site-LAN platziert, falls er nicht schon Zielhost ist).
+printer = { vlan = 10, client = "198.51.100.10" }
 tnrs = [
   { node = "site-a--tnr1", export = "site-a--tnr1.txt", mgmt = "10.0.2.107", pos = [100, 1050] },
   { node = "site-a--tnr2", export = "site-a--tnr2.txt", mgmt = "10.0.2.108", pos = [250, 1050] },
