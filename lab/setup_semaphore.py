@@ -123,11 +123,9 @@ TEMPLATES = [
         # (proxmox_api_*) nur auf diesem Branch.
         "branch": "proxmox-vm-sync",
         "survey": [
-            text("pvm_cluster_name", "NetBox-Cluster", "Ziel-Cluster; wird beim Apply angelegt, falls er fehlt",
-                 required=True, default="iLBS Virtualisierungscluster"),
             mode("pvm_dry_run"),
-            # Tenant/Site, Primary-IPv4 und Cloud-Init-Fallback sind in der
-            # Rolle fest, nur IPv4 — keine weiteren Survey-Felder.
+            # Cluster, Tenant/Site, Primary-IPv4 und Cloud-Init-Fallback sind
+            # in der Rolle fest, nur IPv4 — keine weiteren Survey-Felder.
         ],
     },
 ]
