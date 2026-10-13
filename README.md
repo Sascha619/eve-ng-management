@@ -162,7 +162,10 @@ mit `backups/netbox-restore.sh <datei>.sql` zurückspielen.
 
 Semaphore klont `ansible-tam` per `file:///opt/repos/ansible-tam` (Bind-Mount
 von `../ansible-tam`), Branch per `setup_semaphore.py --branch` — committete
-Stände sind ohne Push testbar. Das Environment `lab-defaults` setzt
+Stände sind ohne Push testbar. Ein Template mit eigenem `"branch"` (z.B. ein
+Feature-Branch vor dem Merge) bekommt ein eigenes Repository/Inventory-Paar
+`… @ <branch>`: Semaphore klont das Inventory separat mit dem Branch seines
+Repositorys, ein Branch-Override am Template allein reicht nicht. Das Environment `lab-defaults` setzt
 `ansible_python_interpreter={{ ansible_playbook_python }}`, sonst nimmt Ansible
 für die `connection: local`-Plays das Container-Python ohne librouteros.
 

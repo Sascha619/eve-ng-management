@@ -6,6 +6,8 @@ Legt über die Semaphore-API an, was noch fehlt (Abgleich per Name):
   - Key "None" (lokales Repo braucht keinen Schlüssel)
   - Repository ansible-tam (file:///opt/repos/ansible-tam, siehe docker-compose.yml)
   - Inventory "KLEIN-115 Lab (EVE-NG)" -> ansible/inventory/hosts_lab.yml
+    (Templates mit eigenem "branch" bekommen ein zusätzliches Repository/
+    Inventory-Paar mit Suffix " @ <branch>")
   - Environment "lab-defaults" (Variablen + Secrets)
   - Templates mit Surveys laut den ansible-tam-READMEs
 
@@ -113,6 +115,21 @@ TEMPLATES = [
         "description": "Binär-Backup + Export auf allen Geräten",
         "survey": [],
     },
+    {
+        "name": "Proxmox VMs — Sync nach NetBox",
+        "playbook": "ansible/playbooks/proxmox_vms_sync.yml",
+        "description": "VM-Bestand aus Proxmox (REST-API) einseitig in einen NetBox-Cluster",
+        # Bis zum Merge nach staging liegen Playbook und Inventory-Vars
+        # (proxmox_api_*) nur auf diesem Branch.
+        "branch": "proxmox-vm-sync",
+        "survey": [
+            text("pvm_cluster_name", "NetBox-Cluster", "Ziel-Cluster; wird beim Apply angelegt, falls er fehlt",
+                 required=True, default="iLBS Virtualisierungscluster"),
+            mode("pvm_dry_run"),
+            # Tenant/Site, Primary-IPv4 und Cloud-Init-Fallback sind in der
+            # Rolle fest, nur IPv4 — keine weiteren Survey-Felder.
+        ],
+    },
 ]
 
 
@@ -144,6 +161,24 @@ class Semaphore:
         return obj
 
 
+def ensure_repo_inventory(s, base, pid, key_id, branch, suffix=""):
+    """Repository + Inventory für einen Branch von ansible-tam.
+
+    Pro Branch ein eigenes Paar: Semaphore klont das Inventory separat mit dem
+    Branch SEINES Repositorys — ein git_branch-Override am Template allein
+    ließe das Inventory auf dem Default-Branch.
+    """
+    repo = s.ensure(f"{base}/repositories", REPO_NAME + suffix, {
+        "name": REPO_NAME + suffix, "project_id": pid, "git_url": REPO_URL,
+        "git_branch": branch, "ssh_key_id": key_id,
+    }, "Repository")
+    inventory = s.ensure(f"{base}/inventory", INVENTORY_NAME + suffix, {
+        "name": INVENTORY_NAME + suffix, "project_id": pid, "type": "file", "inventory": INVENTORY_FILE,
+        "ssh_key_id": key_id, "repository_id": repo["id"],
+    }, "Inventory")
+    return repo, inventory
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="http://localhost:3010")
@@ -160,14 +195,7 @@ def main(argv=None) -> int:
     base = f"/api/project/{pid}"
 
     key = s.ensure(f"{base}/keys", "None", {"name": "None", "type": "none", "project_id": pid}, "Key")
-    repo = s.ensure(f"{base}/repositories", REPO_NAME, {
-        "name": REPO_NAME, "project_id": pid, "git_url": REPO_URL,
-        "git_branch": args.branch, "ssh_key_id": key["id"],
-    }, "Repository")
-    inventory = s.ensure(f"{base}/inventory", INVENTORY_NAME, {
-        "name": INVENTORY_NAME, "project_id": pid, "type": "file", "inventory": INVENTORY_FILE,
-        "ssh_key_id": key["id"], "repository_id": repo["id"],
-    }, "Inventory")
+    repos = {args.branch: ensure_repo_inventory(s, base, pid, key["id"], args.branch)}
     env_fields = {"name": ENV_NAME, "project_id": pid,
                   "json": json.dumps(ENV_EXTRA_VARS), "env": json.dumps(ENV_VARS)}
     env = s.ensure(f"{base}/environment", ENV_NAME, {
@@ -182,6 +210,12 @@ def main(argv=None) -> int:
 
     existing = {t["name"]: t for t in s.call("GET", f"{base}/templates") or []}
     for tpl in TEMPLATES:
+        # Templates ohne "branch" laufen auf --branch; eigener Branch ->
+        # eigenes Repository/Inventory-Paar mit Suffix " @ <branch>".
+        branch = tpl.get("branch", args.branch)
+        if branch not in repos:
+            repos[branch] = ensure_repo_inventory(s, base, pid, key["id"], branch, f" @ {branch}")
+        repo, inventory = repos[branch]
         payload = {
             "project_id": pid, "name": tpl["name"], "playbook": tpl["playbook"],
             "description": tpl["description"], "app": "ansible",

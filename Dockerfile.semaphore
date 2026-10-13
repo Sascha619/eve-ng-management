@@ -6,6 +6,6 @@ USER root
 # safe.directory: ansible-tam ist vom Host gemountet (fremde UID), Semaphore
 # klont es per file://.
 RUN "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
-      "librouteros>=3.2.1" "netaddr>=1.0.0" "pynetbox>=7.4" pytz \
+      "librouteros>=3.2.1" "netaddr>=1.0.0" "pynetbox>=7.4" "proxmoxer>=2.0" pytz \
  && git config --system --add safe.directory '*'
 USER 1001
