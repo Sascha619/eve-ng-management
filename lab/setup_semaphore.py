@@ -119,13 +119,11 @@ TEMPLATES = [
         "name": "Proxmox VMs — Sync nach NetBox",
         "playbook": "ansible/playbooks/proxmox_vms_sync.yml",
         "description": "VM-Bestand aus Proxmox (REST-API) einseitig in einen NetBox-Cluster",
-        # Bis zum Merge nach staging liegen Playbook und Inventory-Vars
-        # (proxmox_api_*) nur auf diesem Branch.
-        "branch": "proxmox-vm-sync",
         "survey": [
             mode("pvm_dry_run"),
+            flag("pvm_prune", "Aktion", "Apply", "Apply + Prune"),
             # Cluster, Tenant/Site, Primary-IPv4 und Cloud-Init-Fallback sind
-            # in der Rolle fest, nur IPv4 — keine weiteren Survey-Felder.
+            # in der Rolle fest, nur IPv4.
         ],
     },
 ]
