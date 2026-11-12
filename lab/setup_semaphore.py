@@ -85,6 +85,40 @@ TEMPLATES = [
             mode("vlan_dry_run"),
         ],
     },
+    # Dieselbe vlan.yml in drei Templates, wie sie in der Produktion angelegt
+    # sind: je Weg nur die Felder, die er annimmt.
+    {
+        "name": "ILBS VLAN — Anlegen",
+        "playbook": "ansible/playbooks/vlan.yml",
+        "description": "VLAN mit fester VID und festem Subnetz anlegen",
+        "survey": [
+            text("vlan_id", "VLAN-ID", "1200–4094", required=True, type_="int"),
+            text("vlan_subnet", "Subnetz (CIDR)", "z.B. 172.18.250.0/27", required=True),
+            text("vlan_netbox_vrf", "VRF (optional)", "leer = Global/main"),
+            text("vlan_tenant", "Tenant (optional)", "leer = ilbs-virtualisierungscluster"),
+            mode("vlan_dry_run"),
+        ],
+    },
+    {
+        "name": "ILBS VLAN — Entfernen",
+        "playbook": "ansible/playbooks/vlan.yml",
+        "description": "VLAN entfernen; das Subnetz kommt aus NetBox",
+        "arguments": ["-e", "vlan_state=absent"],
+        "survey": [
+            text("vlan_id", "VLAN-ID", "1200–4094", required=True, type_="int"),
+            mode("vlan_dry_run"),
+        ],
+    },
+    {
+        "name": "ILBS VLAN Auto-Allocator — Self-Service per Host-Count",
+        "playbook": "ansible/playbooks/vlan.yml",
+        "description": "Freie VID und freies Subnetz aus dem Pool in NetBox wählen",
+        "survey": [
+            text("vlan_host_count", "Anzahl nutzbarer Hosts", "1–251", required=True, type_="int"),
+            text("vlan_tenant", "Tenant (optional)", "leer = ilbs-virtualisierungscluster"),
+            mode("vlan_dry_run"),
+        ],
+    },
     {
         "name": "ILBS PVE NAT — Rollout / Prune",
         "playbook": "ansible/playbooks/pve_nat.yml",
@@ -217,6 +251,8 @@ def main(argv=None) -> int:
             "description": tpl["description"], "app": "ansible",
             "inventory_id": inventory["id"], "repository_id": repo["id"],
             "environment_id": env["id"], "survey_vars": tpl["survey"],
+            # Feste CLI-Argumente des Templates (Semaphore erwartet ein JSON-Array als String).
+            "arguments": json.dumps(tpl["arguments"]) if "arguments" in tpl else None,
         }
         if tpl["name"] in existing:
             if not args.update:
