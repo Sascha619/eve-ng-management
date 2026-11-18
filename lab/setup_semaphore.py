@@ -162,6 +162,40 @@ TEMPLATES = [
             # in der Rolle fest, nur IPv4.
         ],
     },
+    # --- Testläufe für den Device Scheduler (Systemstände) -----------------
+    # Konvention dort: ein Template je Gerätekombination, die App übergibt
+    # kein Zielgerät — deshalb festes --limit. Das Playbook liegt nur im
+    # lokalen Zweig lab-marker von ansible-tam und setzt ausschließlich die
+    # System-Notiz (/system note). "branch_override" setzt in Semaphore den
+    # Schalter „Branch" unter „Prompts": damit lässt sich beim Reservieren eine
+    # Version (Branch/Tag) angeben. Sie gilt nur für das Playbook — das
+    # Inventory bleibt auf dem Branch seines Repositorys.
+    *[
+        {
+            "name": f"Lab-Marker — {label}",
+            "playbook": "ansible/playbooks/lab_marker.yml",
+            "description": "Testlauf Device Scheduler: setzt die System-Notiz auf " + label,
+            "branch": "lab-marker",
+            "branch_override": True,
+            "arguments": ["--limit", limit],
+            "survey": [text("marker_text", "Systemstand", "Text der System-Notiz",
+                            required=True, default="Testlauf")],
+        }
+        for label, limit in [
+            ("rtr-ilbs-01", "rtr-ilbs-01"),
+            ("rtr-ilbs-02", "rtr-ilbs-02"),
+            ("rtr-ilbs-01 + rtr-ilbs-02", "rtr-ilbs-01,rtr-ilbs-02"),
+        ]
+    ],
+    {
+        "name": "Lab-Marker — zurücksetzen (rtr-ilbs-01 + rtr-ilbs-02)",
+        "playbook": "ansible/playbooks/lab_marker.yml",
+        "description": "Testlauf Device Scheduler: leert die System-Notiz wieder",
+        "branch": "lab-marker",
+        "branch_override": True,
+        "arguments": ["--limit", "rtr-ilbs-01,rtr-ilbs-02", "-e", "marker_state=absent"],
+        "survey": [],
+    },
 ]
 
 
@@ -255,6 +289,8 @@ def main(argv=None) -> int:
             "environment_id": env["id"], "survey_vars": tpl["survey"],
             # Feste CLI-Argumente des Templates (Semaphore erwartet ein JSON-Array als String).
             "arguments": json.dumps(tpl["arguments"]) if "arguments" in tpl else None,
+            # PUT ersetzt das Template vollständig: ohne das Feld setzte --update den Schalter zurück.
+            "allow_override_branch_in_task": tpl.get("branch_override", False),
         }
         if tpl["name"] in existing:
             if not args.update:
