@@ -1,11 +1,16 @@
-FROM semaphoreui/semaphore:v2.19.16
+FROM semaphoreui/semaphore:v2.20.24
 
 USER root
 # Python-Abhängigkeiten von ansible-tam (ansible/requirements.txt) ins
 # Ansible-venv des Images — Semaphore installiert pip-Requirements nicht selbst.
 # safe.directory: ansible-tam ist vom Host gemountet (fremde UID), Semaphore
 # klont es per file://.
+# /opt/semaphore/ansible-venv: fester Pfad zum venv für ansible_python_interpreter.
+# Semaphore 2.20 wertet Jinja in Extra-Variablen nicht mehr aus, also geht
+# "{{ ansible_playbook_python }}" dort nicht mehr; $VIRTUAL_ENV selbst enthält
+# die Ansible-Version und ändert sich mit dem Image.
 RUN "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
       "librouteros>=3.2.1" "netaddr>=1.0.0" "pynetbox>=7.4" "proxmoxer>=2.0" pytz \
- && git config --system --add safe.directory '*'
+ && git config --system --add safe.directory '*' \
+ && ln -s "$VIRTUAL_ENV" /opt/semaphore/ansible-venv
 USER 1001

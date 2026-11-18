@@ -47,8 +47,10 @@ ENV_SECRETS = {
 }
 # Extra-Vars: Plays mit connection: local würden sonst /usr/bin/python3 des
 # Containers nehmen — librouteros/netaddr liegen aber im Ansible-venv.
+# Fester Pfad (Symlink aus Dockerfile.semaphore): Semaphore 2.20 wertet Jinja
+# in Extra-Vars nicht mehr aus, "{{ ansible_playbook_python }}" käme wörtlich an.
 ENV_EXTRA_VARS = {
-    "ansible_python_interpreter": "{{ ansible_playbook_python }}",
+    "ansible_python_interpreter": "/opt/semaphore/ansible-venv/bin/python3",
 }
 
 

@@ -16,7 +16,7 @@ Host (Ubuntu, KVM/libvirt + Docker)
 │
 ├─ Docker (Compose-Projekt eve-ng-management, Netz 10.250.0.0/24)
 │   ├─ NetBox 4.6 + netbox-routing  http://localhost:8001   admin / admin
-│   └─ Semaphore 2.19    http://localhost:3010   admin / admin
+│   └─ Semaphore 2.20    http://localhost:3010   admin / admin
 │
 ├─ eve-forwards (systemd-User-Unit, socat)
 │   localhost:18728-18732 ──> 10.0.2.101-105:8728   RouterOS-API
@@ -166,8 +166,10 @@ Stände sind ohne Push testbar. Ein Template mit eigenem `"branch"` (z.B. ein
 Feature-Branch vor dem Merge) bekommt ein eigenes Repository/Inventory-Paar
 `… @ <branch>`: Semaphore klont das Inventory separat mit dem Branch seines
 Repositorys, ein Branch-Override am Template allein reicht nicht. Das Environment `lab-defaults` setzt
-`ansible_python_interpreter={{ ansible_playbook_python }}`, sonst nimmt Ansible
-für die `connection: local`-Plays das Container-Python ohne librouteros.
+`ansible_python_interpreter=/opt/semaphore/ansible-venv/bin/python3` (Symlink
+aus `Dockerfile.semaphore`), sonst nimmt Ansible für die `connection: local`-Plays
+das Container-Python ohne librouteros. Jinja wie `{{ ansible_playbook_python }}`
+geht dort seit Semaphore 2.20 nicht mehr: Extra-Variablen kommen wörtlich an.
 
 ### 6. ansible-tam lokal
 
