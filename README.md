@@ -171,6 +171,14 @@ aus `Dockerfile.semaphore`), sonst nimmt Ansible für die `connection: local`-Pl
 das Container-Python ohne librouteros. Jinja wie `{{ ansible_playbook_python }}`
 geht dort seit Semaphore 2.20 nicht mehr: Extra-Variablen kommen wörtlich an.
 
+Das Template „ILBS DNS — dns.tam.ki.lan" (`playbooks/dns.yml`) braucht einen
+echten Proxmox und SSH zur VM. `setup_semaphore.py` legt dafür das Environment
+`lab-dns` an und nimmt `PROXMOX_HOST`, `PROXMOX_USER`, `PROXMOX_TOKEN_ID` und
+`PROXMOX_TOKEN_SECRET` aus der Shell, in der es läuft. Dazu kommen der SSH-Key
+`semaphore-base-key` (neu erzeugt) und das Inventory `… + SSH-Key`. Eine neue
+VM bekommt den Public Key per Cloud-Init. Bei einer bestehenden VM gehört er
+einmal in `~debian/.ssh/authorized_keys`, das Skript gibt ihn beim Anlegen aus.
+
 ### 6. ansible-tam lokal
 
 ```bash

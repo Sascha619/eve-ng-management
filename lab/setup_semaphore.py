@@ -9,6 +9,8 @@ Legt über die Semaphore-API an, was noch fehlt (Abgleich per Name):
     (Templates mit eigenem "branch" bekommen ein zusätzliches Repository/
     Inventory-Paar mit Suffix " @ <branch>")
   - Environment "lab-defaults" (Variablen + Secrets)
+  - für das DNS-Template: Key "semaphore-base-key", Inventory "… + SSH-Key"
+    und Environment "lab-dns" (PROXMOX_* aus der Shell des Aufrufers)
   - Templates mit Surveys laut den ansible-tam-READMEs
 
 Bestehende Templates werden mit --update auf den hier definierten Stand gebracht.
@@ -20,7 +22,11 @@ Aufruf:
 import argparse
 import http.cookiejar
 import json
+import os
+import pathlib
+import subprocess
 import sys
+import tempfile
 import urllib.request
 
 PROJECT = "KLEIN-115"
@@ -52,6 +58,16 @@ ENV_SECRETS = {
 ENV_EXTRA_VARS = {
     "ansible_python_interpreter": "/opt/semaphore/ansible-venv/bin/python3",
 }
+
+# ILBS DNS (playbooks/dns.yml) braucht einen echten Proxmox (fake_proxmox legt
+# keine VM an) und SSH zur VM. Dafür ein eigenes Environment und ein eigenes
+# Inventory mit SSH-Key (Name wie in der Produktion). Die PROXMOX_*-Werte
+# kommen beim Anlegen aus der Shell des Aufrufers, sie stehen nicht im Repo.
+# Ohne ansible_python_interpreter als Extra-Var: die gälte auch auf der VM.
+DNS_ENV_NAME = "lab-dns"
+DNS_KEY_NAME = "semaphore-base-key"
+DNS_INVENTORY_NAME = INVENTORY_NAME + " + SSH-Key"
+DNS_PROXMOX_VARS = ("PROXMOX_HOST", "PROXMOX_USER", "PROXMOX_TOKEN_ID")
 
 
 def mode(var, title="Modus"):
@@ -162,6 +178,13 @@ TEMPLATES = [
             # in der Rolle fest, nur IPv4.
         ],
     },
+    {
+        "name": "ILBS DNS — dns.tam.ki.lan",
+        "playbook": "ansible/playbooks/dns.yml",
+        "description": "DNS-VM auf dem Proxmox sicherstellen, unbound mit den Records aus NetBox",
+        "dns": True,  # eigenes Environment + Inventory, siehe ensure_dns()
+        "survey": [mode("dns_dry_run")],
+    },
     # --- Testläufe für den Device Scheduler (Systemstände) -----------------
     # Konvention dort: ein Template je Gerätekombination, die App übergibt
     # kein Zielgerät — deshalb festes --limit. Das Playbook liegt nur im
@@ -245,6 +268,39 @@ def ensure_repo_inventory(s, base, pid, key_id, branch, suffix=""):
     return repo, inventory
 
 
+def ensure_dns(s, base, pid, repo):
+    """Environment + Inventory für das DNS-Template (echter Proxmox, SSH zur VM)."""
+    key = next((k for k in s.call("GET", f"{base}/keys") or [] if k["name"] == DNS_KEY_NAME), None)
+    if key:
+        print(f"  Key '{DNS_KEY_NAME}' vorhanden (id {key['id']})")
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", DNS_KEY_NAME,
+                            "-f", f"{tmp}/key"], check=True)
+            private, public = (pathlib.Path(tmp, name).read_text() for name in ("key", "key.pub"))
+        key = s.call("POST", f"{base}/keys", {
+            "name": DNS_KEY_NAME, "type": "ssh", "project_id": pid,
+            "ssh": {"login": "", "passphrase": "", "private_key": private},
+        })
+        print(f"  Key '{DNS_KEY_NAME}' angelegt (id {key['id']}). Eine neue VM bekommt ihn per\n"
+              f"  Cloud-Init, bei einer bestehenden gehört er in ~debian/.ssh/authorized_keys:\n"
+              f"    {public.strip()}")
+    inventory = s.ensure(f"{base}/inventory", DNS_INVENTORY_NAME, {
+        "name": DNS_INVENTORY_NAME, "project_id": pid, "type": "file", "inventory": INVENTORY_FILE,
+        "ssh_key_id": key["id"], "repository_id": repo["id"],
+    }, "Inventory")
+    secrets = {"NETBOX_TOKEN": ENV_SECRETS["NETBOX_TOKEN"],
+               "PROXMOX_TOKEN_SECRET": os.environ.get("PROXMOX_TOKEN_SECRET", "")}
+    env = s.ensure(f"{base}/environment", DNS_ENV_NAME, {
+        "name": DNS_ENV_NAME, "project_id": pid, "json": "{}",
+        "env": json.dumps({"ANSIBLE_CONFIG": ENV_VARS["ANSIBLE_CONFIG"], "NETBOX_URL": ENV_VARS["NETBOX_URL"],
+                           **{v: os.environ.get(v, "") for v in DNS_PROXMOX_VARS}}),
+        "secrets": [{"type": "env", "name": k, "secret": v, "operation": "create"}
+                    for k, v in secrets.items() if v],
+    }, "Environment")
+    return env, inventory
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="http://localhost:3010")
@@ -282,11 +338,14 @@ def main(argv=None) -> int:
         if branch not in repos:
             repos[branch] = ensure_repo_inventory(s, base, pid, key["id"], branch, f" @ {branch}")
         repo, inventory = repos[branch]
+        tpl_env = env
+        if tpl.get("dns"):
+            tpl_env, inventory = ensure_dns(s, base, pid, repo)
         payload = {
             "project_id": pid, "name": tpl["name"], "playbook": tpl["playbook"],
             "description": tpl["description"], "app": "ansible",
             "inventory_id": inventory["id"], "repository_id": repo["id"],
-            "environment_id": env["id"], "survey_vars": tpl["survey"],
+            "environment_id": tpl_env["id"], "survey_vars": tpl["survey"],
             # Feste CLI-Argumente des Templates (Semaphore erwartet ein JSON-Array als String).
             "arguments": json.dumps(tpl["arguments"]) if "arguments" in tpl else None,
             # PUT ersetzt das Template vollständig: ohne das Feld setzte --update den Schalter zurück.
